@@ -1306,7 +1306,7 @@ function connectBatchWebSocket(batchId) {
 
             if (shouldPoll && currentBatch) {
                 console.log('切换到轮询模式');
-                startOutlookBatchPolling(currentBatch.batch_id);
+                startBatchPolling(currentBatch.batch_id);
             }
         };
 
@@ -1314,12 +1314,12 @@ function connectBatchWebSocket(batchId) {
             console.error('批量任务 WebSocket 错误:', error);
             stopBatchWebSocketHeartbeat();
             // 切换到轮询
-            startOutlookBatchPolling(batchId);
+            startBatchPolling(batchId);
         };
 
     } catch (error) {
         console.error('批量任务 WebSocket 连接失败:', error);
-        startOutlookBatchPolling(batchId);
+        startBatchPolling(batchId);
     }
 }
 
@@ -1357,11 +1357,11 @@ function cancelBatchViaWebSocket() {
     }
 }
 
-// 开始轮询 Outlook 批量状态（降级方案）
-function startOutlookBatchPolling(batchId) {
+// 开始轮询普通批量状态（降级方案）
+function startBatchPolling(batchId) {
     batchPollingInterval = setInterval(async () => {
         try {
-            const data = await api.get(`/registration/outlook-batch/${batchId}`);
+            const data = await api.get(`/registration/batch/${batchId}`);
 
             // 更新进度
             updateBatchProgress({
@@ -1390,17 +1390,17 @@ function startOutlookBatchPolling(batchId) {
                 // 只显示一次 toast
                 if (!toastShown) {
                     toastShown = true;
-                    addLog('info', `[完成] Outlook 批量任务完成！成功: ${data.success}, 失败: ${data.failed}, 跳过: ${data.skipped || 0}`);
+                    addLog('info', `[完成] 批量任务完成！成功: ${data.success}, 失败: ${data.failed}, 跳过: ${data.skipped || 0}`);
                     if (data.success > 0) {
-                        toast.success(`Outlook 批量注册完成，成功 ${data.success} 个`);
+                        toast.success(`批量注册完成，成功 ${data.success} 个`);
                         loadRecentAccounts();
                     } else {
-                        toast.warning('Outlook 批量注册完成，但没有成功注册任何账号');
+                        toast.warning('批量注册完成，但没有成功注册任何账号');
                     }
                 }
             }
         } catch (error) {
-            console.error('轮询 Outlook 批量状态失败:', error);
+            console.error('轮询批量状态失败:', error);
         }
     }, 2000);
 
