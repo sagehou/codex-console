@@ -84,7 +84,7 @@ class OutlookBatchImportResponse(BaseModel):
 # ============== Helper Functions ==============
 
 # 敏感字段列表，返回响应时需要过滤
-SENSITIVE_FIELDS = {'password', 'api_key', 'refresh_token', 'access_token', 'admin_token'}
+SENSITIVE_FIELDS = {'password', 'api_key', 'refresh_token', 'access_token', 'admin_token', 'site_password'}
 
 def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """过滤敏感配置信息"""
@@ -206,12 +206,13 @@ async def get_service_types():
             {
                 "value": "temp_mail",
                 "label": "Temp-Mail（自部署）",
-                "description": "自部署 Cloudflare Worker 临时邮箱，admin 模式管理",
+                "description": "自部署 Cloudflare Worker 临时邮箱，使用地址密码登录",
                 "config_fields": [
                     {"name": "base_url", "label": "Worker 地址", "required": True, "placeholder": "https://mail.example.com"},
                     {"name": "admin_password", "label": "Admin 密码", "required": True, "secret": True},
                     {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "example.com"},
                     {"name": "enable_prefix", "label": "启用前缀", "required": False, "default": True},
+                    {"name": "site_password", "label": "站点密码", "required": False, "secret": True},
                 ]
             },
             {

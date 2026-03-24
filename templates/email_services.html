@@ -240,6 +240,10 @@
                             <input type="password" id="custom-tm-admin-password" name="tm_admin_password" placeholder="x-admin-auth 密码">
                         </div>
                         <div class="form-group">
+                            <label for="custom-tm-site-password">站点密码 (可选)</label>
+                            <input type="password" id="custom-tm-site-password" name="tm_site_password" placeholder="x-custom-auth 密码，未启用可留空">
+                        </div>
+                        <div class="form-group">
                             <label for="custom-tm-domain">邮箱域名</label>
                             <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com">
                         </div>
@@ -373,7 +377,12 @@
                         <div class="form-group">
                             <label for="edit-tm-admin-password">Admin 密码</label>
                             <input type="password" id="edit-tm-admin-password" name="tm_admin_password" placeholder="留空则不修改">
-                            <small style="color: var(--text-muted);">留空则保持原值不变</small>
+                            <small style="color: var(--text-muted);">创建新邮箱时使用，留空则保持原值不变</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-tm-site-password">站点密码 (可选)</label>
+                            <input type="password" id="edit-tm-site-password" name="tm_site_password" placeholder="留空则不修改">
+                            <small style="color: var(--text-muted);">仅在 TempMail 启用全局私有密码时填写，留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
                             <label for="edit-tm-domain">邮箱域名</label>

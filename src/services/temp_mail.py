@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, List
 
 from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
+from ..core.utils import calculate_sha256
 from ..config.constants import OTP_CODE_PATTERN
 
 
@@ -26,7 +27,7 @@ logger = logging.getLogger(__name__)
 class TempMailService(BaseEmailService):
     """
     Temp-Mail 邮箱服务
-    基于自部署 Cloudflare Worker 的临时邮箱，admin 模式管理邮箱
+    基于自部署 Cloudflare Worker 的临时邮箱，admin 创建地址 + 地址密码登录收件箱
     不走代理，不使用 requests 库
     """
 
@@ -37,8 +38,9 @@ class TempMailService(BaseEmailService):
         Args:
             config: 配置字典，支持以下键:
                 - base_url: Worker 域名地址，如 https://mail.example.com (必需)
-                - admin_password: Admin 密码，对应 x-admin-auth header (必需)
+                - admin_password: Admin 密码，对应 x-admin-auth header (创建邮箱必需)
                 - domain: 邮箱域名，如 example.com (必需)
+                - site_password: 站点全局密码，对应 x-custom-auth header (可选)
                 - enable_prefix: 是否启用前缀，默认 True
                 - timeout: 请求超时时间，默认 30
                 - max_retries: 最大重试次数，默认 3
@@ -65,7 +67,7 @@ class TempMailService(BaseEmailService):
         )
         self.http_client = HTTPClient(proxy_url=None, config=http_config)
 
-        # 邮箱缓存：email -> {jwt, address}
+        # 邮箱缓存：email -> {jwt, address, password}
         self._email_cache: Dict[str, Dict[str, Any]] = {}
 
     def _decode_mime_header(self, value: str) -> str:
@@ -159,13 +161,52 @@ class TempMailService(BaseEmailService):
             "raw": raw,
         }
 
-    def _admin_headers(self) -> Dict[str, str]:
-        """构造 admin 请求头"""
-        return {
-            "x-admin-auth": self.config["admin_password"],
+    def _default_headers(self) -> Dict[str, str]:
+        """构造基础请求头"""
+        headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
+        site_password = str(self.config.get("site_password") or "").strip()
+        if site_password:
+            headers["x-custom-auth"] = site_password
+        return headers
+
+    def _admin_headers(self) -> Dict[str, str]:
+        headers = self._default_headers()
+        headers["x-admin-auth"] = self.config["admin_password"]
+        return headers
+
+    def _address_headers(self, jwt: str) -> Dict[str, str]:
+        headers = self._default_headers()
+        headers["Authorization"] = f"Bearer {jwt}"
+        return headers
+
+    def _login_address(self, email: str, password: str) -> str:
+        """使用地址密码登录并返回最新 JWT。"""
+        if not email or not password:
+            raise EmailServiceError("缺少地址密码，无法登录 TempMail 邮箱")
+
+        response = self._make_request(
+            "POST",
+            "/api/address_login",
+            json={
+                "email": email,
+                "password": calculate_sha256(password),
+            },
+        )
+        jwt = str(response.get("jwt") or "").strip()
+        if not jwt:
+            raise EmailServiceError(f"TempMail 地址登录返回数据不完整: {response}")
+        cached = self._email_cache.get(email, {})
+        self._email_cache[email] = {
+            **cached,
+            "email": email,
+            "jwt": jwt,
+            "address": str(response.get("address") or email).strip() or email,
+            "password": password,
+        }
+        return jwt
 
     def _make_request(self, method: str, path: str, **kwargs) -> Any:
         """
@@ -185,9 +226,9 @@ class TempMailService(BaseEmailService):
         base_url = self.config["base_url"].rstrip("/")
         url = f"{base_url}{path}"
 
-        # 合并默认 admin headers
+        # 合并默认 headers
         kwargs.setdefault("headers", {})
-        for k, v in self._admin_headers().items():
+        for k, v in self._default_headers().items():
             kwargs["headers"].setdefault(k, v)
 
         try:
@@ -221,7 +262,8 @@ class TempMailService(BaseEmailService):
         Returns:
             包含邮箱信息的字典:
             - email: 邮箱地址
-            - jwt: 用户级 JWT token
+            - jwt: 地址级 JWT token
+            - password: 地址密码
             - service_id: 同 email（用作标识）
         """
         import random
@@ -237,16 +279,21 @@ class TempMailService(BaseEmailService):
         enable_prefix = self.config.get("enable_prefix", True)
 
         body = {
-            "enablePrefix": enable_prefix,
             "name": name,
             "domain": domain,
         }
 
         try:
-            response = self._make_request("POST", "/admin/new_address", json=body)
+            response = self._make_request(
+                "POST",
+                "/admin/new_address",
+                json=body,
+                headers=self._admin_headers(),
+            )
 
             address = response.get("address", "").strip()
             jwt = response.get("jwt", "").strip()
+            password = response.get("password", "").strip()
 
             if not address:
                 raise EmailServiceError(f"API 返回数据不完整: {response}")
@@ -254,6 +301,7 @@ class TempMailService(BaseEmailService):
             email_info = {
                 "email": address,
                 "jwt": jwt,
+                "password": password,
                 "service_id": address,
                 "id": address,
                 "created_at": time.time(),
@@ -298,27 +346,44 @@ class TempMailService(BaseEmailService):
         start_time = time.time()
         seen_mail_ids: set = set()
 
-        # 优先使用用户级 JWT，回退到 admin API
+        # 优先使用地址级 JWT，401 时使用地址密码重新登录
         cached = self._email_cache.get(email, {})
         jwt = cached.get("jwt")
+        password = cached.get("password")
+
+        if not jwt and password:
+            try:
+                jwt = self._login_address(email, password)
+            except Exception as e:
+                logger.debug(f"TempMail 地址登录失败: {e}")
 
         while time.time() - start_time < timeout:
             try:
                 if jwt:
-                    response = self._make_request(
-                        "GET",
-                        "/user_api/mails",
-                        params={"limit": 20, "offset": 0},
-                        headers={"x-user-token": jwt, "Content-Type": "application/json", "Accept": "application/json"},
-                    )
+                    try:
+                        response = self._make_request(
+                            "GET",
+                            "/api/mails",
+                            params={"limit": 20, "offset": 0},
+                            headers=self._address_headers(jwt),
+                        )
+                    except EmailServiceError as e:
+                        if "401" in str(e) and password:
+                            jwt = self._login_address(email, password)
+                            response = self._make_request(
+                                "GET",
+                                "/api/mails",
+                                params={"limit": 20, "offset": 0},
+                                headers=self._address_headers(jwt),
+                            )
+                        else:
+                            raise
                 else:
-                    response = self._make_request(
-                        "GET",
-                        "/admin/mails",
-                        params={"limit": 20, "offset": 0, "address": email},
-                    )
+                    logger.debug("TempMail 邮箱 %s 缺少可用 JWT，等待下次轮询", email)
+                    time.sleep(3)
+                    continue
 
-                # /user_api/mails 和 /admin/mails 返回格式相同: {"results": [...], "total": N}
+                # /api/mails 返回格式: {"results": [...], "count": N}
                 mails = response.get("results", [])
                 if not isinstance(mails, list):
                     time.sleep(3)
@@ -361,47 +426,15 @@ class TempMailService(BaseEmailService):
         """
         列出邮箱
 
-        Args:
-            limit: 返回数量上限
-            offset: 分页偏移
-            **kwargs: 额外查询参数，透传给 admin API
+        当前服务不提供全局邮箱列表，只返回本地缓存的邮箱。
 
         Returns:
             邮箱列表
         """
-        params = {
-            "limit": limit,
-            "offset": offset,
-        }
-        params.update({k: v for k, v in kwargs.items() if v is not None})
-
         try:
-            response = self._make_request("GET", "/admin/mails", params=params)
-            mails = response.get("results", [])
-            if not isinstance(mails, list):
-                raise EmailServiceError(f"API 返回数据格式错误: {response}")
-
-            emails: List[Dict[str, Any]] = []
-            for mail in mails:
-                address = (mail.get("address") or "").strip()
-                mail_id = mail.get("id") or address
-                email_info = {
-                    "id": mail_id,
-                    "service_id": mail_id,
-                    "email": address,
-                    "subject": mail.get("subject"),
-                    "from": mail.get("source"),
-                    "created_at": mail.get("createdAt") or mail.get("created_at"),
-                    "raw_data": mail,
-                }
-                emails.append(email_info)
-
-                if address:
-                    cached = self._email_cache.get(address, {})
-                    self._email_cache[address] = {**cached, **email_info}
-
             self.update_status(True)
-            return emails
+            emails = list(self._email_cache.values())
+            return emails[offset: offset + limit]
         except Exception as e:
             logger.warning(f"列出 TempMail 邮箱失败: {e}")
             self.update_status(False, e)
@@ -444,8 +477,7 @@ class TempMailService(BaseEmailService):
         try:
             self._make_request(
                 "GET",
-                "/admin/mails",
-                params={"limit": 1, "offset": 0},
+                "/health_check",
             )
             self.update_status(True)
             return True
