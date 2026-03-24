@@ -404,6 +404,7 @@ class RegistrationEngine:
             response_data = response.json()
             page_type = response_data.get("page", {}).get("type", "")
             self._log(f"登录密码响应页面类型: {page_type}")
+            self._log(f"重新登录密码校验后页面类型: {page_type}")
 
             is_existing = page_type == OPENAI_PAGE_TYPES["EMAIL_OTP_VERIFICATION"]
             if is_existing:
@@ -454,6 +455,10 @@ class RegistrationEngine:
 
     def _complete_token_exchange(self, result: RegistrationResult) -> bool:
         """在登录态已建立后，继续完成 workspace 和 OAuth token 获取。"""
+        if self._token_acquisition_requires_login:
+            self._log(
+                f"进入第二次邮箱验证码阶段，等待 OpenAI 自动发送登录验证码，otp_sent_at={self._otp_sent_at}"
+            )
         self._log("等待登录验证码到场，最后这位嘉宾还在路上...")
         code = self._get_verification_code()
         if not code:
