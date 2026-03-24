@@ -112,3 +112,55 @@ def test_get_verification_code_reauths_with_address_password_after_401():
     second_mail_call = fake_client.calls[2]
     assert second_mail_call["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
     assert second_mail_call["kwargs"]["headers"]["x-custom-auth"] == "site-secret"
+
+
+def test_get_verification_code_skips_previously_used_code_until_new_code_arrives():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "Your verification code",
+                        "raw": "Subject: Your verification code\n\nYour OpenAI verification code is 111111",
+                    }
+                ]
+            }
+        ),
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "Your verification code",
+                        "raw": "Subject: Your verification code\n\nYour OpenAI verification code is 111111",
+                    },
+                    {
+                        "id": 2,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "Your verification code",
+                        "raw": "Subject: Your verification code\n\nYour OpenAI verification code is 222222",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+    }
+
+    first_code = service.get_verification_code("tester@example.com", timeout=1)
+    second_code = service.get_verification_code("tester@example.com", timeout=4)
+
+    assert first_code == "111111"
+    assert second_code == "222222"
