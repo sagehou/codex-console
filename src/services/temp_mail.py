@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS = [
     re.compile(OTP_CODE_SEMANTIC_PATTERN, re.IGNORECASE),
+    re.compile(r"your\s+chatgpt\s+code\s+is[^\d]{0,20}(\d{6})", re.IGNORECASE | re.DOTALL),
     re.compile(r"(?:temporary\s+verification\s+code|verification\s+code|one-time\s+code|one-time\s+passcode|passcode|otp)[^\d]{0,80}(\d{6})", re.IGNORECASE | re.DOTALL),
 ]
 
@@ -177,7 +178,8 @@ class TempMailService(BaseEmailService):
                 if match:
                     return match.group(1)
 
-        combined = "\n".join(part for part in (subject, body, raw) if part)
+        fallback_parts = [part for part in (subject, body) if part]
+        combined = "\n".join(fallback_parts)
         match = re.search(pattern, combined)
         if match:
             return match.group(1)

@@ -228,3 +228,67 @@ def test_get_verification_code_matches_code_on_next_line_after_instruction_text(
     code = service.get_verification_code("tester@example.com", timeout=1)
 
     assert code == "996777"
+
+
+def test_get_verification_code_ignores_date_like_digits_before_real_signup_code():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "OpenAI verification",
+                        "raw": "Date: 202603\n\nYour ChatGPT code is 202683\nEnter this temporary verification code to continue:\n202683\n",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+    }
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "202683"
+
+
+def test_get_verification_code_matches_inline_login_code_format():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "ChatGPT Log-in Code",
+                        "raw": "Date: 202603\n\nYour ChatGPT code is 636051\nEnter this temporary verification code to continue: 636051. ChatGPT Log-in Code\n",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+    }
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "636051"
