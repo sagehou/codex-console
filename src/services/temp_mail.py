@@ -18,10 +18,15 @@ from typing import Optional, Dict, Any, List
 from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
 from ..core.utils import calculate_sha256
-from ..config.constants import OTP_CODE_PATTERN
+from ..config.constants import OTP_CODE_PATTERN, OTP_CODE_SEMANTIC_PATTERN
 
 
 logger = logging.getLogger(__name__)
+
+TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS = [
+    re.compile(OTP_CODE_SEMANTIC_PATTERN, re.IGNORECASE),
+    re.compile(r"(?:temporary\s+verification\s+code|verification\s+code|one-time\s+code|one-time\s+passcode|passcode|otp)[^\d]{0,80}(\d{6})", re.IGNORECASE | re.DOTALL),
+]
 
 
 class TempMailService(BaseEmailService):
@@ -161,6 +166,22 @@ class TempMailService(BaseEmailService):
             "body": body_text,
             "raw": raw,
         }
+
+    def _extract_otp(self, subject: str, body: str, raw: str, pattern: str) -> Optional[str]:
+        """优先提取语义验证码，失败后回退到通用 6 位数字匹配。"""
+        for text in (body, raw, subject):
+            if not text:
+                continue
+            for contextual_pattern in TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS:
+                match = contextual_pattern.search(text)
+                if match:
+                    return match.group(1)
+
+        combined = "\n".join(part for part in (subject, body, raw) if part)
+        match = re.search(pattern, combined)
+        if match:
+            return match.group(1)
+        return None
 
     def _default_headers(self) -> Dict[str, str]:
         """构造基础请求头"""
@@ -411,9 +432,8 @@ class TempMailService(BaseEmailService):
                     if "openai" not in sender and "openai" not in content.lower():
                         continue
 
-                    match = re.search(pattern, content)
-                    if match:
-                        code = match.group(1)
+                    code = self._extract_otp(subject, body_text, raw_text, pattern)
+                    if code:
                         if code in used_codes:
                             logger.debug(f"跳过 TempMail 邮箱 {email} 已使用的验证码: {code}")
                             continue

@@ -164,3 +164,67 @@ def test_get_verification_code_skips_previously_used_code_until_new_code_arrives
 
     assert first_code == "111111"
     assert second_code == "222222"
+
+
+def test_get_verification_code_prefers_semantic_code_over_earlier_unrelated_digits():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "OpenAI verification",
+                        "raw": "Subject: OpenAI verification\n\nReference 036964\nYour verification code is 996777\n",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+    }
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "996777"
+
+
+def test_get_verification_code_matches_code_on_next_line_after_instruction_text():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "OpenAI verification",
+                        "raw": "Subject: OpenAI verification\n\nReference 036964\nEnter this temporary verification code to continue:\n\n996777\n",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+    }
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "996777"
