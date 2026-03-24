@@ -159,6 +159,65 @@ docker run -d \
 
 `-v $(pwd)/data:/app/data` 很重要，这会把数据库和账号数据持久化到宿主机。否则容器一重启，数据也可能跟着表演消失术。
 
+## 自部署 Temp-Mail 接入说明
+
+如果你使用的是 `cloudflare_temp_email` 这一类自部署临时邮箱，当前版本已经按它的现有接口模型做了适配，不需要再改邮箱端代码。
+
+### 需要配置的字段
+
+在 Web UI 的“邮箱服务”里选择 `Temp-Mail（自部署）` 后，需要填写：
+
+- `Worker 地址`：你的 temp mail 站点地址，例如 `https://temp-email.example.com`
+- `Admin 密码`：用于创建新邮箱地址，对应 temp mail 的 `x-admin-auth`
+- `邮箱域名`：创建地址时使用的域名，例如 `example.com`
+- `站点密码 (可选)`：如果 temp mail 开启了全局私有访问密码，则填写；未开启可留空，对应 `x-custom-auth`
+
+### 当前接入流程
+
+`codex-console` 现在走的是下面这条链路：
+
+1. 创建邮箱：`POST /admin/new_address`
+2. 使用创建返回的地址密码登录邮箱：`POST /api/address_login`
+3. 拉取收件箱：`GET /api/mails`
+
+也就是说：
+
+- `admin_password` 只用于创建邮箱
+- 验证码读取不是走 admin 收件箱，而是走地址级登录
+- `site_password` 如果配置了，会在创建邮箱、地址登录、读取邮件这三步都自动带上
+
+### 验证码邮件兼容情况
+
+当前版本已经兼容下面几类 ChatGPT/OpenAI 验证码正文格式：
+
+```text
+Your ChatGPT code is 202683
+Enter this temporary verification code to continue:
+202683
+```
+
+```text
+Your ChatGPT code is 636051
+Enter this temporary verification code to continue: 636051. ChatGPT Log-in Code
+```
+
+并且会尽量避免把这类无关数字误识别成验证码：
+
+- 邮件头里的日期片段，例如 `202603`
+- raw MIME 里的边界串、跟踪号、其它随机 6 位数字
+
+### 排查建议
+
+如果 Temp-Mail 接码不正常，优先检查这几项：
+
+- `Worker 地址` 是否能从 `codex-console` 容器访问到
+- `Admin 密码` 是否正确（创建邮箱失败通常卡在这里）
+- `站点密码` 是否和 temp mail 当前配置一致
+- temp mail 是否启用了 `address_password`
+- 容器日志里是否出现 `/api/address_login`、`/api/mails` 的 401/403
+
+如果日志里还在请求 `/user_api/mails`，通常说明你跑的不是新镜像。
+
 ## 使用远程 PostgreSQL
 
 ```bash
