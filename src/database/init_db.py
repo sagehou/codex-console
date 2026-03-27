@@ -2,11 +2,36 @@
 数据库初始化和初始化数据
 """
 
+from contextlib import contextmanager
+
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import NoSuchTableError
 
 from .session import init_database
 from .models import Base
+
+
+@contextmanager
+def _get_managed_db_session(db_manager):
+    db_resource = db_manager.get_db()
+
+    if hasattr(db_resource, "__enter__") and hasattr(db_resource, "__exit__"):
+        with db_resource as db:
+            yield db
+        return
+
+    generator = iter(db_resource)
+    db = next(generator)
+    try:
+        yield db
+    finally:
+        try:
+            next(generator)
+        except StopIteration:
+            pass
+        close = getattr(db, "close", None)
+        if callable(close):
+            close()
 
 
 def _backfill_sub2api_service_target_type(db_manager):
@@ -21,7 +46,7 @@ def _backfill_sub2api_service_target_type(db_manager):
     if "target_type" in column_names:
         return
 
-    with db_manager.get_db() as db:
+    with _get_managed_db_session(db_manager) as db:
         db.execute(
             text(
                 "ALTER TABLE sub2api_services "
@@ -51,7 +76,7 @@ def _backfill_cliproxy_environment_scope_columns(db_manager):
     if not statements:
         return
 
-    with db_manager.get_db() as db:
+    with _get_managed_db_session(db_manager) as db:
         for statement in statements:
             db.execute(text(statement))
         db.commit()
@@ -75,7 +100,7 @@ def _backfill_account_traceability_columns(db_manager):
     if not statements:
         return
 
-    with db_manager.get_db() as db:
+    with _get_managed_db_session(db_manager) as db:
         for statement in statements:
             db.execute(text(statement))
         db.commit()
@@ -133,7 +158,7 @@ def check_database_connection(database_url: str = None) -> bool:
     """
     try:
         db_manager = init_database(database_url)
-        with db_manager.get_db() as db:
+        with _get_managed_db_session(db_manager) as db:
             # 尝试执行一个简单的查询
             db.execute("SELECT 1")
         print("数据库连接正常")

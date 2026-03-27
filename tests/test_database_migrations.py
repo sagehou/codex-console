@@ -30,6 +30,15 @@ class FakeDbManager:
         yield self.session
 
 
+class FakeGeneratorDbManager:
+    def __init__(self, dialect_name):
+        self.engine = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
+        self.session = FakeSession()
+
+    def get_db(self):
+        yield self.session
+
+
 def test_backfill_sub2api_target_type_uses_backend_aware_column_lookup_for_postgresql(monkeypatch):
     manager = FakeDbManager("postgresql")
 
@@ -127,5 +136,27 @@ def test_backfill_account_traceability_columns_adds_missing_columns(monkeypatch)
     )
     assert any(
         "ALTER TABLE accounts ADD COLUMN last_upload_target VARCHAR(20)" in statement
+        for statement in manager.session.statements
+    )
+
+
+def test_backfill_account_traceability_columns_supports_generator_get_db(monkeypatch):
+    manager = FakeGeneratorDbManager("postgresql")
+
+    class FakeInspector:
+        def get_columns(self, table_name):
+            assert table_name == "accounts"
+            return [
+                {"name": "id"},
+                {"name": "email"},
+            ]
+
+    monkeypatch.setattr(init_db, "inspect", lambda engine: FakeInspector())
+
+    init_db._backfill_account_traceability_columns(manager)
+
+    assert manager.session.committed is True
+    assert any(
+        "ALTER TABLE accounts ADD COLUMN platform_source VARCHAR(50)" in statement
         for statement in manager.session.statements
     )
