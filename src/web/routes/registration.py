@@ -208,7 +208,7 @@ def _normalize_email_service_config(
     if service_type == EmailServiceType.MOE_MAIL:
         if 'domain' in normalized and 'default_domain' not in normalized:
             normalized['default_domain'] = normalized.pop('domain')
-    elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.FREEMAIL):
+    elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.CLOUDMAIL, EmailServiceType.FREEMAIL):
         if 'default_domain' in normalized and 'domain' not in normalized:
             normalized['domain'] = normalized.pop('default_domain')
     elif service_type == EmailServiceType.DUCK_MAIL:
@@ -372,6 +372,20 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                         logger.info(f"使用数据库 Freemail 服务: {db_service.name}")
                     else:
                         raise ValueError("没有可用的 Freemail 邮箱服务，请先在邮箱服务页面添加服务")
+                elif service_type == EmailServiceType.CLOUDMAIL:
+                    from ...database.models import EmailService as EmailServiceModel
+
+                    db_service = db.query(EmailServiceModel).filter(
+                        EmailServiceModel.service_type == "cloudmail",
+                        EmailServiceModel.enabled == True
+                    ).order_by(EmailServiceModel.priority.asc()).first()
+
+                    if db_service and db_service.config:
+                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
+                        logger.info(f"使用数据库 CloudMail 服务: {db_service.name}")
+                    else:
+                        raise ValueError("没有可用的 CloudMail 邮箱服务，请先在邮箱服务页面添加服务")
                 elif service_type == EmailServiceType.IMAP_MAIL:
                     from ...database.models import EmailService as EmailServiceModel
 
@@ -462,7 +476,12 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                                     if not _svc:
                                         continue
                                     log_callback(f"[Sub2API] 正在把账号发往服务站: {_svc.name}")
-                                    _ok, _msg = upload_to_sub2api([saved_account], _svc.api_url, _svc.api_key)
+                                    _ok, _msg = upload_to_sub2api(
+                                        [saved_account],
+                                        _svc.api_url,
+                                        _svc.api_key,
+                                        target_type=getattr(_svc, "target_type", "sub2api"),
+                                    )
                                     log_callback(f"[Sub2API] {'成功' if _ok else '失败'}({_svc.name}): {_msg}")
                                 except Exception as _e:
                                     log_callback(f"[Sub2API] 异常({_sid}): {_e}")
@@ -1121,6 +1140,11 @@ async def get_available_email_services():
             "count": 0,
             "services": []
         },
+        "cloudmail": {
+            "available": False,
+            "count": 0,
+            "services": []
+        },
         "freemail": {
             "available": False,
             "count": 0,
@@ -1220,6 +1244,24 @@ async def get_available_email_services():
 
         result["duck_mail"]["count"] = len(duck_mail_services)
         result["duck_mail"]["available"] = len(duck_mail_services) > 0
+
+        cloudmail_services = db.query(EmailServiceModel).filter(
+            EmailServiceModel.service_type == "cloudmail",
+            EmailServiceModel.enabled == True
+        ).order_by(EmailServiceModel.priority.asc()).all()
+
+        for service in cloudmail_services:
+            config = service.config or {}
+            result["cloudmail"]["services"].append({
+                "id": service.id,
+                "name": service.name,
+                "type": "cloudmail",
+                "domain": config.get("domain") or config.get("default_domain"),
+                "priority": service.priority
+            })
+
+        result["cloudmail"]["count"] = len(cloudmail_services)
+        result["cloudmail"]["available"] = len(cloudmail_services) > 0
 
         freemail_services = db.query(EmailServiceModel).filter(
             EmailServiceModel.service_type == "freemail",

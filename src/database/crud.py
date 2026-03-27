@@ -5,9 +5,23 @@
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, desc, asc, func
+from sqlalchemy import and_, or_, desc, asc, func, text
+from sqlalchemy.exc import IntegrityError
 
-from .models import Account, EmailService, RegistrationTask, Setting, Proxy, CpaService, Sub2ApiService
+from .models import (
+    Account,
+    EmailService,
+    RegistrationTask,
+    Setting,
+    Proxy,
+    CpaService,
+    Sub2ApiService,
+    CLIProxyAPIEnvironment,
+    RemoteAuthInventory,
+    MaintenanceRun,
+    MaintenanceActionLog,
+    AuditLog,
+)
 
 
 # ============================================================================
@@ -31,7 +45,9 @@ def create_account(
     expires_at: Optional['datetime'] = None,
     extra_data: Optional[Dict[str, Any]] = None,
     status: Optional[str] = None,
-    source: Optional[str] = None
+    source: Optional[str] = None,
+    platform_source: Optional[str] = None,
+    last_upload_target: Optional[str] = None,
 ) -> Account:
     """创建新账户"""
     db_account = Account(
@@ -51,6 +67,8 @@ def create_account(
         extra_data=extra_data or {},
         status=status or 'active',
         source=source or 'register',
+        platform_source=platform_source,
+        last_upload_target=last_upload_target,
         registered_at=datetime.utcnow()
     )
     db.add(db_account)
@@ -150,6 +168,233 @@ def get_accounts_count(
         query = query.filter(Account.status == status)
 
     return query.scalar()
+
+
+def _isoformat(value: Optional[datetime]) -> Optional[str]:
+    return value.isoformat() if value else None
+
+
+def _build_subscription_summary(account: Account) -> Dict[str, Any]:
+    return {
+        "subscription_type": account.subscription_type,
+        "subscription_at": _isoformat(account.subscription_at),
+        "has_subscription": bool(account.subscription_type),
+    }
+
+
+def _build_quota_summary(inventory: Optional[RemoteAuthInventory]) -> Dict[str, Any]:
+    payload = (inventory.payload_json or {}) if inventory else {}
+    return {
+        "probe_status": inventory.probe_status if inventory else None,
+        "slots_used": payload.get("slots_used"),
+        "slots_total": payload.get("slots_total"),
+    }
+
+
+def _build_remote_inventory_summary(
+    inventory: Optional[RemoteAuthInventory],
+    environment_map: Dict[int, CLIProxyAPIEnvironment],
+) -> Optional[Dict[str, Any]]:
+    if inventory is None:
+        return None
+
+    environment = environment_map.get(inventory.environment_id)
+    return {
+        "environment_id": inventory.environment_id,
+        "environment_name": environment.name if environment else None,
+        "remote_file_id": inventory.remote_file_id,
+        "remote_account_id": inventory.remote_account_id,
+        "sync_state": inventory.sync_state,
+        "probe_status": inventory.probe_status,
+        "disable_source": inventory.disable_source,
+        "last_seen_at": _isoformat(inventory.last_seen_at),
+        "last_probed_at": _isoformat(inventory.last_probed_at),
+    }
+
+
+def _build_export_status_summary(account: Account) -> Dict[str, Any]:
+    return {
+        "cpa_uploaded": bool(account.cpa_uploaded),
+        "cpa_uploaded_at": _isoformat(account.cpa_uploaded_at),
+        "last_upload_target": account.last_upload_target,
+    }
+
+
+def _build_billing_status_summary(account: Account) -> Dict[str, Any]:
+    return {
+        "subscription_type": account.subscription_type,
+        "subscription_at": _isoformat(account.subscription_at),
+        "status": "active" if account.subscription_type else "free",
+    }
+
+
+def _empty_recent_task_summary() -> Dict[str, Any]:
+    return {
+        "task_id": None,
+        "status": None,
+        "created_at": None,
+        "completed_at": None,
+    }
+
+
+def _build_cliproxy_jump_entry(
+    inventory: Optional[RemoteAuthInventory],
+    run: Optional[MaintenanceRun],
+) -> Optional[Dict[str, Any]]:
+    if inventory is None and run is None:
+        return None
+
+    environment_id = inventory.environment_id if inventory else run.environment_id if run else None
+    run_id = run.id if run else None
+    href = f"/api/cliproxy-environments/runs/{run_id}" if run_id is not None else None
+    return {
+        "label": "Open CLIProxy maintenance context",
+        "href": href,
+        "environment_id": environment_id,
+        "run_id": run_id,
+    }
+
+
+def _build_automation_trace_summary(
+    account: Account,
+    environment: Optional[CLIProxyAPIEnvironment],
+    run: Optional[MaintenanceRun],
+    recent_task_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    run_summary = run.summary_json if run and isinstance(run.summary_json, dict) else {}
+    result_summary = run_summary.get("result_summary") or {}
+    completed_at = _isoformat(
+        environment.last_maintained_at if environment and environment.last_maintained_at else run.completed_at if run and run.completed_at else run.updated_at if run else None
+    )
+
+    if run is not None:
+        log_excerpt = (
+            f"Maintain run {run.status} at {completed_at or 'unknown time'} with "
+            f"records={result_summary.get('records', 0)}, "
+            f"matches={result_summary.get('matches', 0)}, "
+            f"disabled={result_summary.get('disabled', 0)}."
+        )
+    else:
+        log_excerpt = "No maintenance trace available for this account."
+
+    return {
+        "source": account.platform_source,
+        "batch_target": account.last_upload_target,
+        "proxy": account.proxy_used,
+        "recent_task_status": recent_task_summary.get("status"),
+        "recent_task_label": "No recent account task" if not recent_task_summary.get("status") else recent_task_summary.get("status"),
+        "log_excerpt": log_excerpt,
+    }
+
+
+def _get_account_workbench_context(
+    db: Session,
+    account_ids: List[int],
+) -> tuple[
+    Dict[int, Account],
+    Dict[int, Optional[RemoteAuthInventory]],
+    Dict[int, CLIProxyAPIEnvironment],
+    Dict[int, MaintenanceRun],
+]:
+    if not account_ids:
+        return {}, {}, {}, {}
+
+    accounts = db.query(Account).filter(Account.id.in_(account_ids)).all()
+    account_map = {account.id: account for account in accounts}
+    inventory_rows = (
+        db.query(RemoteAuthInventory)
+        .filter(RemoteAuthInventory.local_account_id.in_(account_ids))
+        .order_by(desc(RemoteAuthInventory.last_seen_at), desc(RemoteAuthInventory.id))
+        .all()
+    )
+
+    latest_inventory_by_account: Dict[int, RemoteAuthInventory] = {}
+    environment_ids = set()
+    for row in inventory_rows:
+        if row.local_account_id is None or row.local_account_id in latest_inventory_by_account:
+            continue
+        latest_inventory_by_account[row.local_account_id] = row
+        environment_ids.add(row.environment_id)
+
+    environment_map: Dict[int, CLIProxyAPIEnvironment] = {}
+    if environment_ids:
+        environments = db.query(CLIProxyAPIEnvironment).filter(CLIProxyAPIEnvironment.id.in_(environment_ids)).all()
+        environment_map = {environment.id: environment for environment in environments}
+
+    latest_runs_by_environment: Dict[int, MaintenanceRun] = {}
+    if environment_ids:
+        runs = (
+            db.query(MaintenanceRun)
+            .filter(MaintenanceRun.environment_id.in_(environment_ids))
+            .order_by(desc(MaintenanceRun.id))
+            .all()
+        )
+        for run in runs:
+            if run.environment_id is None or run.environment_id in latest_runs_by_environment:
+                continue
+            latest_runs_by_environment[run.environment_id] = run
+
+    latest_inventory_optional = {
+        account_id: latest_inventory_by_account.get(account_id) for account_id in account_ids
+    }
+
+    return account_map, latest_inventory_optional, environment_map, latest_runs_by_environment
+
+
+def get_account_workbench_list_summaries(
+    db: Session,
+    account_ids: List[int],
+) -> Dict[int, Dict[str, Any]]:
+    account_map, inventory_map, environment_map, latest_runs_by_environment = _get_account_workbench_context(db, account_ids)
+
+    summaries: Dict[int, Dict[str, Any]] = {}
+    for account_id, account in account_map.items():
+        inventory = inventory_map.get(account_id)
+        environment = environment_map.get(inventory.environment_id) if inventory else None
+        run = latest_runs_by_environment.get(inventory.environment_id) if inventory else None
+        summaries[account_id] = {
+            "platform_source": account.platform_source,
+            "subscription_summary": _build_subscription_summary(account),
+            "quota_summary": _build_quota_summary(inventory),
+            "remote_sync_state": inventory.sync_state if inventory else None,
+            "remote_environment_name": environment.name if environment else None,
+            "last_maintenance_status": run.status if run else None,
+            "last_maintenance_at": _isoformat(run.completed_at if run and run.completed_at else run.updated_at if run else None),
+            "last_upload_target": account.last_upload_target,
+        }
+
+    return summaries
+
+
+def get_account_workbench_detail_summary(
+    db: Session,
+    account_id: int,
+) -> Dict[str, Any]:
+    account_map, inventory_map, environment_map, latest_runs_by_environment = _get_account_workbench_context(db, [account_id])
+    account = account_map.get(account_id)
+    if account is None:
+        return {}
+
+    inventory = inventory_map.get(account_id)
+    environment = environment_map.get(inventory.environment_id) if inventory else None
+    run = latest_runs_by_environment.get(inventory.environment_id) if inventory else None
+
+    return {
+        "platform_source": account.platform_source,
+        "subscription_summary": _build_subscription_summary(account),
+        "quota_summary": _build_quota_summary(inventory),
+        "remote_sync_state": inventory.sync_state if inventory else None,
+        "remote_environment_name": environment.name if environment else None,
+        "last_maintenance_status": run.status if run else None,
+        "last_maintenance_at": _isoformat(run.completed_at if run and run.completed_at else run.updated_at if run else None),
+        "last_upload_target": account.last_upload_target,
+        "export_status_summary": _build_export_status_summary(account),
+        "billing_status_summary": _build_billing_status_summary(account),
+        "remote_inventory_summary": _build_remote_inventory_summary(inventory, environment_map),
+        "recent_task_summary": _empty_recent_task_summary(),
+        "cliproxy_jump_entry": _build_cliproxy_jump_entry(inventory, run),
+        "automation_trace_summary": _build_automation_trace_summary(account, environment, run, _empty_recent_task_summary()),
+    }
 
 
 # ============================================================================
@@ -595,6 +840,7 @@ def create_sub2api_service(
     name: str,
     api_url: str,
     api_key: str,
+    target_type: str = "sub2api",
     enabled: bool = True,
     priority: int = 0
 ) -> Sub2ApiService:
@@ -603,6 +849,7 @@ def create_sub2api_service(
         name=name,
         api_url=api_url,
         api_key=api_key,
+        target_type=target_type,
         enabled=enabled,
         priority=priority,
     )
@@ -712,3 +959,456 @@ def delete_tm_service(db: Session, service_id: int) -> bool:
     db.delete(svc)
     db.commit()
     return True
+
+
+# ============================================================================
+# CLIProxy 环境 / 维护 / 审计 CRUD
+# ============================================================================
+
+MAINTENANCE_RUN_TYPES = {"scan", "maintain", "refill"}
+MAINTENANCE_RUN_IN_FLIGHT_STATUSES = {"queued", "running", "cancelling"}
+MAINTENANCE_RUN_METADATA_FIELDS = {"current_stage", "progress_percent", "cancellable", "idempotency_key", "request"}
+REFILL_RESERVED_V1_ERROR = "CLIProxy refill is reserved in v1 and not enabled"
+
+
+def _validate_maintenance_run_type_enabled(run_type: str) -> None:
+    if run_type not in MAINTENANCE_RUN_TYPES:
+        raise ValueError(f"unsupported maintenance run type: {run_type}")
+    if run_type == "refill":
+        raise ValueError(REFILL_RESERVED_V1_ERROR)
+
+
+def _merge_maintenance_summary(
+    summary_json: Optional[Dict[str, Any]],
+    **kwargs,
+) -> Optional[Dict[str, Any]]:
+    merged = dict(summary_json or {})
+    touched = bool(summary_json)
+    for key in MAINTENANCE_RUN_METADATA_FIELDS:
+        if key in kwargs:
+            merged[key] = kwargs.pop(key)
+            touched = True
+    return merged if touched else summary_json
+
+
+def create_cliproxy_environment(
+    db: Session,
+    name: str,
+    base_url: str,
+    target_type: str,
+    provider: str,
+    token: Optional[str] = None,
+    provider_scope: Optional[str] = None,
+    target_scope: Optional[str] = None,
+    scope_rules_json: Optional[Dict[str, Any]] = None,
+    enabled: bool = True,
+    is_default: bool = False,
+    notes: Optional[str] = None,
+) -> CLIProxyAPIEnvironment:
+    if is_default:
+        db.query(CLIProxyAPIEnvironment).filter(CLIProxyAPIEnvironment.is_default == True).update({"is_default": False})
+
+    environment = CLIProxyAPIEnvironment(
+        name=name,
+        base_url=base_url,
+        target_type=target_type,
+        provider=provider,
+        provider_scope=provider_scope,
+        target_scope=target_scope,
+        scope_rules_json=scope_rules_json,
+        enabled=enabled,
+        is_default=is_default,
+        notes=notes,
+    )
+    if token is not None:
+        environment.set_token(token)
+
+    db.add(environment)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise
+    db.refresh(environment)
+    return environment
+
+
+def get_cliproxy_environment_by_id(db: Session, environment_id: int) -> Optional[CLIProxyAPIEnvironment]:
+    return db.query(CLIProxyAPIEnvironment).filter(CLIProxyAPIEnvironment.id == environment_id).first()
+
+
+def get_cliproxy_environments(db: Session, enabled: Optional[bool] = None) -> List[CLIProxyAPIEnvironment]:
+    query = db.query(CLIProxyAPIEnvironment)
+    if enabled is not None:
+        query = query.filter(CLIProxyAPIEnvironment.enabled == enabled)
+    return query.order_by(asc(CLIProxyAPIEnvironment.name), asc(CLIProxyAPIEnvironment.id)).all()
+
+
+def update_cliproxy_environment(db: Session, environment_id: int, **kwargs) -> Optional[CLIProxyAPIEnvironment]:
+    environment = get_cliproxy_environment_by_id(db, environment_id)
+    if not environment:
+        return None
+
+    token_present = "token" in kwargs
+    token = kwargs.pop("token") if token_present else None
+    is_default = kwargs.get("is_default")
+
+    if is_default:
+        db.query(CLIProxyAPIEnvironment).filter(
+            CLIProxyAPIEnvironment.is_default == True,
+            CLIProxyAPIEnvironment.id != environment_id,
+        ).update({"is_default": False})
+
+    for key, value in kwargs.items():
+        if hasattr(environment, key):
+            setattr(environment, key, value)
+
+    if token_present:
+        environment.set_token(token or "")
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise
+    db.refresh(environment)
+    return environment
+
+
+def create_maintenance_run(
+    db: Session,
+    run_type: str,
+    environment_id: Optional[int] = None,
+    status: str = "pending",
+    summary_json: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+) -> MaintenanceRun:
+    _validate_maintenance_run_type_enabled(run_type)
+
+    summary_json = _merge_maintenance_summary(summary_json)
+
+    run = MaintenanceRun(
+        run_type=run_type,
+        environment_id=environment_id,
+        status=status,
+        summary_json=summary_json,
+        error_message=error_message,
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def update_maintenance_run(db: Session, run_id: int, **kwargs) -> Optional[MaintenanceRun]:
+    run = db.query(MaintenanceRun).filter(MaintenanceRun.id == run_id).first()
+    if not run:
+        return None
+    explicit_summary = kwargs.pop("summary_json", None)
+    summary_base = dict(run.summary_json or {})
+    if explicit_summary:
+        summary_base.update(explicit_summary)
+    run.summary_json = _merge_maintenance_summary(summary_base or None, **kwargs)
+    for key, value in kwargs.items():
+        if hasattr(run, key):
+            setattr(run, key, value)
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def get_maintenance_run_by_id(db: Session, run_id: int) -> Optional[MaintenanceRun]:
+    return db.query(MaintenanceRun).filter(MaintenanceRun.id == run_id).first()
+
+
+def get_maintenance_runs(
+    db: Session,
+    environment_id: Optional[int] = None,
+    run_type: Optional[str] = None,
+) -> List[MaintenanceRun]:
+    query = db.query(MaintenanceRun)
+    if environment_id is not None:
+        query = query.filter(MaintenanceRun.environment_id == environment_id)
+    if run_type is not None:
+        query = query.filter(MaintenanceRun.run_type == run_type)
+    return query.order_by(desc(MaintenanceRun.id)).all()
+
+
+def get_in_flight_maintenance_run(db: Session, environment_id: int) -> Optional[MaintenanceRun]:
+    return (
+        db.query(MaintenanceRun)
+        .filter(MaintenanceRun.environment_id == environment_id)
+        .filter(MaintenanceRun.status.in_(MAINTENANCE_RUN_IN_FLIGHT_STATUSES))
+        .order_by(desc(MaintenanceRun.id))
+        .first()
+    )
+
+
+def begin_immediate_transaction(db: Session) -> None:
+    bind = db.get_bind()
+    if bind is not None and bind.dialect.name == "sqlite":
+        db.execute(text("BEGIN IMMEDIATE"))
+
+
+def create_maintenance_run_if_available(
+    db: Session,
+    run_type: str,
+    environment_id: int,
+    request_data: Dict[str, Any],
+) -> tuple[MaintenanceRun, bool]:
+    _validate_maintenance_run_type_enabled(run_type)
+    idempotency_key = request_data.get("idempotency_key")
+    begin_immediate_transaction(db)
+
+    if idempotency_key:
+        replay = get_recent_idempotent_maintenance_run(
+            db,
+            environment_id=environment_id,
+            run_type=run_type,
+            idempotency_key=idempotency_key,
+            request=request_data,
+        )
+        if replay is not None:
+            db.commit()
+            db.refresh(replay)
+            return replay, False
+
+    in_flight = get_in_flight_maintenance_run(db, environment_id)
+    if in_flight is not None:
+        db.commit()
+        db.refresh(in_flight)
+        return in_flight, False
+
+    run = MaintenanceRun(
+        run_type=run_type,
+        environment_id=environment_id,
+        status="queued",
+        summary_json=_merge_maintenance_summary(
+            {
+                "request": request_data,
+                "idempotency_key": idempotency_key,
+                "current_stage": "queued",
+                "progress_percent": 0,
+                "cancellable": True,
+            }
+        ),
+    )
+    db.add(run)
+    db.commit()
+    db.refresh(run)
+    return run, True
+
+
+def get_recent_idempotent_maintenance_run(
+    db: Session,
+    environment_id: int,
+    run_type: str,
+    idempotency_key: str,
+    request: Dict[str, Any],
+    now: Optional[datetime] = None,
+    window_minutes: int = 10,
+) -> Optional[MaintenanceRun]:
+    cutoff = (now or datetime.utcnow()) - timedelta(minutes=window_minutes)
+    runs = (
+        db.query(MaintenanceRun)
+        .filter(MaintenanceRun.environment_id == environment_id)
+        .filter(MaintenanceRun.run_type == run_type)
+        .filter(MaintenanceRun.created_at >= cutoff)
+        .order_by(desc(MaintenanceRun.id))
+        .all()
+    )
+    for run in runs:
+        summary = run.summary_json or {}
+        existing_key = summary.get("idempotency_key")
+        if existing_key is None:
+            existing_key = (summary.get("request") or {}).get("idempotency_key")
+        if existing_key != idempotency_key:
+            continue
+        if summary.get("request") != request:
+            continue
+        return run
+    return None
+
+
+def create_maintenance_action_log(
+    db: Session,
+    run_id: int,
+    action_type: str,
+    status: str = "pending",
+    environment_id: Optional[int] = None,
+    remote_file_id: Optional[str] = None,
+    message: Optional[str] = None,
+    details_json: Optional[Dict[str, Any]] = None,
+) -> MaintenanceActionLog:
+    action_log = MaintenanceActionLog(
+        run_id=run_id,
+        environment_id=environment_id,
+        action_type=action_type,
+        status=status,
+        remote_file_id=remote_file_id,
+        message=message,
+        details_json=details_json,
+    )
+    db.add(action_log)
+    db.commit()
+    db.refresh(action_log)
+    if action_type in {"disable", "reenable"}:
+        write_audit_log(
+            db,
+            event_type="maintain_action",
+            actor="webui",
+            environment_id=environment_id,
+            run_id=run_id,
+            message=message,
+            details_json={
+                "resource": "action_log",
+                "resource_id": action_log.id,
+                "action_type": action_type,
+                "status": status,
+                "remote_file_id": remote_file_id,
+                "details_json": details_json,
+            },
+        )
+    return action_log
+
+
+def get_maintenance_action_log_by_id(db: Session, action_log_id: int) -> Optional[MaintenanceActionLog]:
+    return db.query(MaintenanceActionLog).filter(MaintenanceActionLog.id == action_log_id).first()
+
+
+def get_maintenance_action_logs(
+    db: Session,
+    run_id: Optional[int] = None,
+    environment_id: Optional[int] = None,
+) -> List[MaintenanceActionLog]:
+    query = db.query(MaintenanceActionLog)
+    if run_id is not None:
+        query = query.filter(MaintenanceActionLog.run_id == run_id)
+    if environment_id is not None:
+        query = query.filter(MaintenanceActionLog.environment_id == environment_id)
+    return query.order_by(asc(MaintenanceActionLog.id)).all()
+
+
+def update_maintenance_action_log(db: Session, action_log_id: int, **kwargs) -> Optional[MaintenanceActionLog]:
+    action_log = get_maintenance_action_log_by_id(db, action_log_id)
+    if not action_log:
+        return None
+    for key, value in kwargs.items():
+        if hasattr(action_log, key):
+            setattr(action_log, key, value)
+    db.commit()
+    db.refresh(action_log)
+    return action_log
+
+
+def write_audit_log(
+    db: Session,
+    event_type: str,
+    actor: str = "system",
+    environment_id: Optional[int] = None,
+    run_id: Optional[int] = None,
+    message: Optional[str] = None,
+    details_json: Optional[Dict[str, Any]] = None,
+) -> AuditLog:
+    audit_log = AuditLog(
+        event_type=event_type,
+        actor=actor,
+        environment_id=environment_id,
+        run_id=run_id,
+        message=message,
+        details_json=details_json,
+    )
+    db.add(audit_log)
+    db.commit()
+    db.refresh(audit_log)
+    return audit_log
+
+
+def get_remote_auth_inventory(
+    db: Session,
+    environment_id: Optional[int] = None,
+) -> List[RemoteAuthInventory]:
+    query = db.query(RemoteAuthInventory)
+    if environment_id is not None:
+        query = query.filter(RemoteAuthInventory.environment_id == environment_id)
+    return query.order_by(asc(RemoteAuthInventory.id)).all()
+
+
+def get_audit_logs(
+    db: Session,
+    environment_id: Optional[int] = None,
+    run_id: Optional[int] = None,
+    event_type: Optional[str] = None,
+    resource: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+) -> List[AuditLog]:
+    query = db.query(AuditLog)
+    if environment_id is not None:
+        query = query.filter(AuditLog.environment_id == environment_id)
+    if run_id is not None:
+        query = query.filter(AuditLog.run_id == run_id)
+    if event_type is not None:
+        query = query.filter(AuditLog.event_type == event_type)
+    if start_time is not None:
+        query = query.filter(AuditLog.created_at >= start_time)
+    if end_time is not None:
+        query = query.filter(AuditLog.created_at <= end_time)
+    rows = query.order_by(desc(AuditLog.id)).all()
+    if resource is None:
+        return rows
+    return [row for row in rows if (row.details_json or {}).get("resource") == resource]
+
+
+def upsert_remote_auth_inventory(
+    db: Session,
+    environment_id: int,
+    remote_file_id: str,
+    email: Optional[str] = None,
+    payload_json: Optional[Dict[str, Any]] = None,
+    remote_account_id: Optional[str] = None,
+    local_account_id: Optional[int] = None,
+    last_seen_at: Optional[datetime] = None,
+    last_probed_at: Optional[datetime] = None,
+    sync_state: Optional[str] = None,
+    probe_status: Optional[str] = None,
+    disable_source: Optional[str] = None,
+) -> RemoteAuthInventory:
+    inventory = db.query(RemoteAuthInventory).filter(
+        RemoteAuthInventory.environment_id == environment_id,
+        RemoteAuthInventory.remote_file_id == remote_file_id,
+    ).first()
+
+    effective_last_seen_at = last_seen_at or datetime.utcnow()
+
+    if inventory is None:
+        inventory = RemoteAuthInventory(
+            environment_id=environment_id,
+            remote_file_id=remote_file_id,
+            email=email,
+            remote_account_id=remote_account_id,
+            local_account_id=local_account_id,
+            payload_json=payload_json,
+            last_seen_at=effective_last_seen_at,
+            last_probed_at=last_probed_at,
+            sync_state=sync_state or "unlinked",
+            probe_status=probe_status or "unknown",
+            disable_source=disable_source,
+        )
+        db.add(inventory)
+    else:
+        inventory.email = email
+        inventory.remote_account_id = remote_account_id
+        inventory.local_account_id = local_account_id
+        inventory.payload_json = payload_json
+        inventory.last_seen_at = effective_last_seen_at
+        inventory.last_probed_at = last_probed_at
+        if sync_state is not None:
+            inventory.sync_state = sync_state
+        if probe_status is not None:
+            inventory.probe_status = probe_status
+        if disable_source is not None:
+            inventory.disable_source = disable_source
+
+    db.flush()
+    return inventory

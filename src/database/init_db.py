@@ -2,8 +2,83 @@
 数据库初始化和初始化数据
 """
 
+from sqlalchemy import inspect, text
+from sqlalchemy.exc import NoSuchTableError
+
 from .session import init_database
 from .models import Base
+
+
+def _backfill_sub2api_service_target_type(db_manager):
+    """为旧数据库补充 sub2api_services.target_type 字段。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        columns = inspector.get_columns("sub2api_services")
+    except NoSuchTableError:
+        return
+
+    column_names = {column["name"] for column in columns}
+    if "target_type" in column_names:
+        return
+
+    with db_manager.get_db() as db:
+        db.execute(
+            text(
+                "ALTER TABLE sub2api_services "
+                "ADD COLUMN target_type VARCHAR(20) NOT NULL DEFAULT 'sub2api'"
+            )
+        )
+        db.commit()
+
+
+def _backfill_cliproxy_environment_scope_columns(db_manager):
+    """为旧数据库补充 cliproxy_environments 范围字段。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        columns = inspector.get_columns("cliproxy_environments")
+    except NoSuchTableError:
+        return
+
+    column_names = {column["name"] for column in columns}
+    statements = []
+    if "provider_scope" not in column_names:
+        statements.append("ALTER TABLE cliproxy_environments ADD COLUMN provider_scope VARCHAR(100)")
+    if "target_scope" not in column_names:
+        statements.append("ALTER TABLE cliproxy_environments ADD COLUMN target_scope VARCHAR(100)")
+    if "scope_rules_json" not in column_names:
+        statements.append("ALTER TABLE cliproxy_environments ADD COLUMN scope_rules_json TEXT")
+
+    if not statements:
+        return
+
+    with db_manager.get_db() as db:
+        for statement in statements:
+            db.execute(text(statement))
+        db.commit()
+
+
+def _backfill_account_traceability_columns(db_manager):
+    """为旧数据库补充 accounts 追踪字段。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        columns = inspector.get_columns("accounts")
+    except NoSuchTableError:
+        return
+
+    column_names = {column["name"] for column in columns}
+    statements = []
+    if "platform_source" not in column_names:
+        statements.append("ALTER TABLE accounts ADD COLUMN platform_source VARCHAR(50)")
+    if "last_upload_target" not in column_names:
+        statements.append("ALTER TABLE accounts ADD COLUMN last_upload_target VARCHAR(20)")
+
+    if not statements:
+        return
+
+    with db_manager.get_db() as db:
+        for statement in statements:
+            db.execute(text(statement))
+        db.commit()
 
 
 def initialize_database(database_url: str = None):
@@ -16,6 +91,11 @@ def initialize_database(database_url: str = None):
 
     # 创建表
     db_manager.create_tables()
+
+    # 兼容旧库结构
+    _backfill_sub2api_service_target_type(db_manager)
+    _backfill_cliproxy_environment_scope_columns(db_manager)
+    _backfill_account_traceability_columns(db_manager)
 
     # 初始化默认设置（从 settings 模块导入以避免循环导入）
     from ..config.settings import init_default_settings

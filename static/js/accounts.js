@@ -11,6 +11,8 @@ let selectedAccounts = new Set();
 let isLoading = false;
 let selectAllPages = false;  // 是否选中了全部页
 let currentFilters = { status: '', email_service: '', search: '' };  // 当前筛选条件
+let currentAccounts = [];
+let activeAccountId = null;
 
 // DOM 元素
 const elements = {
@@ -34,9 +36,19 @@ const elements = {
     prevPage: document.getElementById('prev-page'),
     nextPage: document.getElementById('next-page'),
     pageInfo: document.getElementById('page-info'),
-    detailModal: document.getElementById('detail-modal'),
-    modalBody: document.getElementById('modal-body'),
-    closeModal: document.getElementById('close-modal')
+    closeModal: document.getElementById('close-modal'),
+    workbench: document.getElementById('accounts-workbench'),
+    listPageSummary: document.getElementById('list-page-summary'),
+    selectionBannerAnchor: document.getElementById('accounts-selection-banner-anchor'),
+    bulkBar: document.getElementById('accounts-bulk-bar'),
+    bulkSelectionCount: document.getElementById('bulk-selection-count'),
+    bulkSelectionContext: document.getElementById('bulk-selection-context'),
+    detailIdentityTitle: document.getElementById('detail-identity-title'),
+    detailIdentitySubtitle: document.getElementById('detail-identity-subtitle'),
+    detailSubscriptionQuota: document.getElementById('detail-subscription-quota'),
+    detailCoreOps: document.getElementById('detail-core-ops'),
+    detailAutomationTrace: document.getElementById('detail-automation-trace'),
+    detailCliProxySummary: document.getElementById('detail-cliproxy-summary')
 };
 
 // 初始化
@@ -157,16 +169,13 @@ function initEventListeners() {
         elements.exportMenu.classList.remove('active');
     });
 
-    // 关闭模态框
-    elements.closeModal.addEventListener('click', () => {
-        elements.detailModal.classList.remove('active');
-    });
-
-    elements.detailModal.addEventListener('click', (e) => {
-        if (e.target === elements.detailModal) {
-            elements.detailModal.classList.remove('active');
-        }
-    });
+    if (elements.closeModal) {
+        elements.closeModal.addEventListener('click', () => {
+            activeAccountId = null;
+            renderAccounts(currentAccounts);
+            renderEmptyDetailPanel();
+        });
+    }
 
     // 点击其他地方关闭下拉菜单
     document.addEventListener('click', () => {
@@ -245,6 +254,10 @@ async function loadAccounts() {
     try {
         const data = await api.get(`/accounts?${params}`);
         totalAccounts = data.total;
+        currentAccounts = data.accounts;
+        if (activeAccountId && !currentAccounts.some(account => account.id === activeAccountId)) {
+            activeAccountId = null;
+        }
         renderAccounts(data.accounts);
         updatePagination();
     } catch (error) {
@@ -267,62 +280,77 @@ async function loadAccounts() {
 
 // 渲染账号列表
 function renderAccounts(accounts) {
+    if (elements.listPageSummary) {
+        elements.listPageSummary.textContent = `第 ${currentPage} 页`;
+    }
+
     if (accounts.length === 0) {
         elements.table.innerHTML = `
-            <tr>
-                <td colspan="9">
-                    <div class="empty-state">
-                        <div class="empty-state-icon">📭</div>
-                        <div class="empty-state-title">暂无数据</div>
-                        <div class="empty-state-description">没有找到符合条件的账号记录</div>
-                    </div>
-                </td>
-            </tr>
+            <div class="empty-state">
+                <div class="empty-state-icon">📭</div>
+                <div class="empty-state-title">暂无数据</div>
+                <div class="empty-state-description">没有找到符合条件的账号记录</div>
+            </div>
         `;
+        renderEmptyDetailPanel();
         return;
     }
 
     elements.table.innerHTML = accounts.map(account => `
-        <tr data-id="${account.id}">
-            <td>
+        <article class="account-row-card ${activeAccountId === account.id ? 'is-active' : ''}" data-id="${account.id}">
+            <div class="account-select-cell">
                 <input type="checkbox" data-id="${account.id}"
                     ${selectedAccounts.has(account.id) ? 'checked' : ''}>
-            </td>
-            <td>${account.id}</td>
-            <td>
-                <span style="display:inline-flex;align-items:center;gap:4px;">
-                    <span class="email-cell" title="${escapeHtml(account.email)}">${escapeHtml(account.email)}</span>
+            </div>
+            <div class="account-primary">
+                <div class="account-title-row">
+                    <button type="button" class="account-email-button" data-view-account="${account.id}" title="查看详情">${escapeHtml(account.email)}</button>
                     <button class="btn-copy-icon copy-email-btn" data-email="${escapeHtml(account.email)}" title="复制邮箱">📋</button>
-                </span>
-            </td>
-            <td class="password-cell">
-                ${account.password
+                    <span class="summary-pill"><strong>ID ${account.id}</strong><span>${getServiceTypeText(account.email_service)}</span></span>
+                    <span class="summary-pill"><strong>${escapeHtml(account.platform_source || 'unknown')}</strong><span>platform_source</span></span>
+                </div>
+                <div class="account-summary-grid">
+                    <span class="summary-pill"><strong>${formatSubscriptionLabel(account)}</strong><span>subscription / quota</span></span>
+                    <span class="summary-pill"><strong>${formatRiskLabel(account)}</strong><span>risk / pending</span></span>
+                    <span class="summary-pill"><strong>${formatRecentActivityLabel(account)}</strong><span>recent activity</span></span>
+                    <span class="summary-pill"><strong>${formatRemoteMaintenanceLabel(account)}</strong><span>remote maintenance</span></span>
+                </div>
+                <div class="account-status-row">
+                    <span class="summary-pill"><strong>${getStatusText('account', account.status)}</strong><span>账号状态</span></span>
+                    <span class="summary-pill"><strong>${escapeHtml(account.remote_environment_name || '-')}</strong><span>环境</span></span>
+                    <span class="summary-pill"><strong>${escapeHtml(account.last_upload_target || '-')}</strong><span>upload target</span></span>
+                </div>
+                <div class="password-cell">
+                    ${account.password
                     ? `<span style="display:inline-flex;align-items:center;gap:4px;">
                         <span class="password-hidden" data-pwd="${escapeHtml(account.password)}" onclick="togglePassword(this, this.dataset.pwd)" title="点击查看">${escapeHtml(account.password.substring(0, 4) + '****')}</span>
                         <button class="btn-copy-icon copy-pwd-btn" data-pwd="${escapeHtml(account.password)}" title="复制密码">📋</button>
-                       </span>`
+                        </span>`
                     : '-'}
-            </td>
-            <td>${getServiceTypeText(account.email_service)}</td>
-            <td>${getStatusIcon(account.status)}</td>
-            <td>
-                <div class="cpa-status">
-                    ${account.cpa_uploaded
-                        ? `<span class="badge uploaded" title="已上传于 ${format.date(account.cpa_uploaded_at)}">✓</span>`
-                        : `<span class="badge pending">-</span>`}
                 </div>
-            </td>
-            <td>
-                <div class="cpa-status">
-                    ${account.subscription_type
-                        ? `<span class="badge uploaded" title="${account.subscription_type}">${account.subscription_type}</span>`
-                        : `<span class="badge pending">-</span>`}
                 </div>
-            </td>
-            <td>${format.date(account.last_refresh) || '-'}</td>
-            <td>
+            </div>
+            <div class="account-supporting">
+                <div class="micro-panel">
+                    <h4>订阅与额度</h4>
+                    <p>${formatSubscriptionPanel(account)}</p>
+                </div>
+                <div class="micro-panel">
+                    <h4>风险与最近活动</h4>
+                    <p>${formatRiskPanel(account)}；${formatRecentActivityPanel(account)}</p>
+                </div>
+                <div class="micro-panel">
+                    <h4>远程维护摘要</h4>
+                    <p>${formatRemoteMaintenancePanel(account)}</p>
+                </div>
+            </div>
+            <div class="account-actions">
+                <button class="btn btn-secondary btn-sm" onclick="viewAccount(${account.id})">详情</button>
+                <button class="btn btn-primary btn-sm" onclick="refreshToken(${account.id})">刷新</button>
+                <button class="btn btn-secondary btn-sm" onclick="uploadAccount(${account.id})">上传</button>
+                <button class="btn btn-secondary btn-sm" onclick="markSubscription(${account.id})">标记订阅</button>
+                <button class="btn btn-secondary btn-sm" onclick="checkInboxCode(${account.id})">收件箱</button>
                 <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">
-                    <button class="btn btn-secondary btn-sm" onclick="viewAccount(${account.id})">详情</button>
                     <div class="dropdown" style="position:relative;">
                         <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleMoreMenu(this)">更多</button>
                         <div class="dropdown-menu" style="min-width:100px;">
@@ -334,8 +362,8 @@ function renderAccounts(accounts) {
                     </div>
                     <button class="btn btn-danger btn-sm" onclick="deleteAccount(${account.id}, '${escapeHtml(account.email)}')">删除</button>
                 </div>
-            </td>
-        </tr>
+            </div>
+        </article>
     `).join('');
 
     // 绑定复选框事件
@@ -366,6 +394,10 @@ function renderAccounts(accounts) {
         });
     });
 
+    elements.table.querySelectorAll('[data-view-account]').forEach(btn => {
+        btn.addEventListener('click', () => viewAccount(parseInt(btn.dataset.viewAccount, 10)));
+    });
+
     // 绑定复制密码按钮
     elements.table.querySelectorAll('.copy-pwd-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -380,6 +412,15 @@ function renderAccounts(accounts) {
     elements.selectAll.checked = allCbs.length > 0 && checkedCbs.length === allCbs.length;
     elements.selectAll.indeterminate = checkedCbs.length > 0 && checkedCbs.length < allCbs.length;
     renderSelectAllBanner();
+
+    if (activeAccountId) {
+        const activeAccount = accounts.find(account => account.id === activeAccountId);
+        if (activeAccount) {
+            updateDetailIdentity(activeAccount);
+        }
+    } else {
+        renderEmptyDetailPanel();
+    }
 }
 
 // 切换密码显示
@@ -403,6 +444,9 @@ function updatePagination() {
     elements.nextPage.disabled = currentPage >= totalPages;
 
     elements.pageInfo.textContent = `第 ${currentPage} 页 / 共 ${totalPages} 页`;
+    if (elements.listPageSummary) {
+        elements.listPageSummary.textContent = `第 ${currentPage} 页 / 共 ${totalPages} 页`;
+    }
 }
 
 // 重置全选所有页状态
@@ -451,8 +495,10 @@ function renderSelectAllBanner() {
         banner = document.createElement('div');
         banner.id = 'select-all-banner';
         banner.style.cssText = 'background:var(--primary-light,#e8f0fe);color:var(--primary-color,#1a73e8);padding:8px 16px;text-align:center;font-size:0.875rem;border-bottom:1px solid var(--border-color);';
-        const tableContainer = document.querySelector('.table-container');
-        if (tableContainer) tableContainer.insertAdjacentElement('beforebegin', banner);
+        const bannerAnchor = elements.selectionBannerAnchor;
+        if (bannerAnchor) {
+            bannerAnchor.insertAdjacentElement('afterend', banner);
+        }
     }
 
     if (selectAllPages) {
@@ -484,6 +530,14 @@ function updateBatchButtons() {
     elements.batchValidateBtn.textContent = count > 0 ? `✅ 验证 (${count})` : '✅ 验证Token';
     elements.batchUploadBtn.textContent = count > 0 ? `☁️ 上传 (${count})` : '☁️ 上传';
     elements.batchCheckSubBtn.textContent = count > 0 ? `🔍 检测 (${count})` : '🔍 检测订阅';
+
+    if (elements.bulkBar && elements.bulkSelectionCount && elements.bulkSelectionContext) {
+        elements.bulkBar.classList.toggle('is-visible', count > 0);
+        elements.bulkSelectionCount.textContent = count > 0 ? `已选择 ${count} 个账号` : '未选择账号';
+        elements.bulkSelectionContext.textContent = selectAllPages
+            ? '当前批量操作将应用到全部筛选结果。'
+            : '支持刷新、验证、检测订阅、上传、导出和删除。';
+    }
 }
 
 // 刷新单个账号Token
@@ -548,99 +602,13 @@ async function viewAccount(id) {
     try {
         const account = await api.get(`/accounts/${id}`);
         const tokens = await api.get(`/accounts/${id}/tokens`);
-
-        elements.modalBody.innerHTML = `
-            <div class="info-grid">
-                <div class="info-item">
-                    <span class="label">邮箱</span>
-                    <span class="value">
-                        ${escapeHtml(account.email)}
-                        <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.email)}')" title="复制">
-                            📋
-                        </button>
-                    </span>
-                </div>
-                <div class="info-item">
-                    <span class="label">密码</span>
-                    <span class="value">
-                        ${account.password
-                            ? `<code style="font-size: 0.75rem;">${escapeHtml(account.password)}</code>
-                               <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(account.password)}')" title="复制">📋</button>`
-                            : '-'}
-                    </span>
-                </div>
-                <div class="info-item">
-                    <span class="label">邮箱服务</span>
-                    <span class="value">${getServiceTypeText(account.email_service)}</span>
-                </div>
-                <div class="info-item">
-                    <span class="label">状态</span>
-                    <span class="value">
-                        <span class="status-badge ${getStatusClass('account', account.status)}">
-                            ${getStatusText('account', account.status)}
-                        </span>
-                    </span>
-                </div>
-                <div class="info-item">
-                    <span class="label">注册时间</span>
-                    <span class="value">${format.date(account.registered_at)}</span>
-                </div>
-                <div class="info-item">
-                    <span class="label">最后刷新</span>
-                    <span class="value">${format.date(account.last_refresh) || '-'}</span>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Account ID</span>
-                    <span class="value" style="font-size: 0.75rem; word-break: break-all;">
-                        ${escapeHtml(account.account_id || '-')}
-                    </span>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Workspace ID</span>
-                    <span class="value" style="font-size: 0.75rem; word-break: break-all;">
-                        ${escapeHtml(account.workspace_id || '-')}
-                    </span>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Client ID</span>
-                    <span class="value" style="font-size: 0.75rem; word-break: break-all;">
-                        ${escapeHtml(account.client_id || '-')}
-                    </span>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Access Token</span>
-                    <div class="value" style="font-size: 0.7rem; word-break: break-all; font-family: var(--font-mono); background: var(--surface-hover); padding: 8px; border-radius: 4px;">
-                        ${escapeHtml(tokens.access_token || '-')}
-                        ${tokens.access_token ? `<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(tokens.access_token)}')" style="margin-left: 8px;">📋</button>` : ''}
-                    </div>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Refresh Token</span>
-                    <div class="value" style="font-size: 0.7rem; word-break: break-all; font-family: var(--font-mono); background: var(--surface-hover); padding: 8px; border-radius: 4px;">
-                        ${escapeHtml(tokens.refresh_token || '-')}
-                        ${tokens.refresh_token ? `<button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(tokens.refresh_token)}')" style="margin-left: 8px;">📋</button>` : ''}
-                    </div>
-                </div>
-                <div class="info-item" style="grid-column: span 2;">
-                    <span class="label">Cookies（支付用）</span>
-                    <div class="value">
-                        <textarea id="cookies-input-${id}" rows="3"
-                            style="width:100%;font-size:0.7rem;font-family:var(--font-mono);background:var(--surface-hover);border:1px solid var(--border);border-radius:4px;padding:6px;color:var(--text-primary);resize:vertical;"
-                            placeholder="粘贴完整 cookie 字符串，留空则清除">${escapeHtml(account.cookies || '')}</textarea>
-                        <button class="btn btn-secondary btn-sm" style="margin-top:4px" onclick="saveCookies(${id})">
-                            保存 Cookies
-                        </button>
-                    </div>
-                </div>
-            </div>
-            <div style="margin-top: var(--spacing-lg); display: flex; gap: var(--spacing-sm);">
-                <button class="btn btn-primary" onclick="refreshToken(${id}); elements.detailModal.classList.remove('active');">
-                    🔄 刷新Token
-                </button>
-            </div>
-        `;
-
-        elements.detailModal.classList.add('active');
+        activeAccountId = id;
+        renderAccounts(currentAccounts);
+        updateDetailIdentity(account);
+        renderSubscriptionQuotaLayer(account);
+        renderCoreOpsLayer(account, tokens);
+        renderAutomationTraceLayer(account, tokens);
+        renderCliProxySummaryLayer(account);
     } catch (error) {
         toast.error('加载账号详情失败: ' + error.message);
     }
@@ -1235,17 +1203,133 @@ async function checkInboxCode(id) {
 }
 
 function showInboxCodeResult(code, email) {
-    elements.modalBody.innerHTML = `
-        <div style="text-align:center; padding:24px 16px;">
-            <div style="font-size:13px;color:var(--text-muted);margin-bottom:12px;">
-                ${escapeHtml(email)} 最新验证码
-            </div>
-            <div style="font-size:36px;font-weight:700;letter-spacing:8px;
-                        color:var(--primary);font-family:monospace;margin-bottom:20px;">
-                ${escapeHtml(code)}
-            </div>
-            <button class="btn btn-primary" onclick="copyToClipboard('${escapeHtml(code)}')">复制验证码</button>
+    elements.detailAutomationTrace.innerHTML = `
+        <div class="trace-grid" style="flex-direction:column;">
+            <p><strong>${escapeHtml(email)}</strong> 最新验证码</p>
+            <pre>${escapeHtml(code)}</pre>
+            <div><button class="btn btn-primary btn-sm" onclick="copyToClipboard('${escapeHtml(code)}')">复制验证码</button></div>
         </div>
     `;
-    elements.detailModal.classList.add('active');
+}
+
+function updateDetailIdentity(account) {
+    elements.detailIdentityTitle.textContent = account.email || '未命名账号';
+    elements.detailIdentitySubtitle.textContent = `${getServiceTypeText(account.email_service)} · ${getStatusText('account', account.status)} · ${account.platform_source || 'unknown source'}`;
+}
+
+function renderEmptyDetailPanel() {
+    if (!elements.detailSubscriptionQuota) return;
+    elements.detailIdentityTitle.textContent = '选择一个账号';
+    elements.detailIdentitySubtitle.textContent = '从左侧主列表选择账号，查看订阅、额度、远程维护和 CLIProxy 摘要。';
+    elements.detailSubscriptionQuota.textContent = '在这里查看订阅类型、额度限制、风险/待处理状态以及最近活动概览。';
+    elements.detailCoreOps.textContent = '账号身份头部、核心运维卡片和常用快捷操作会在这里展开。';
+    elements.detailAutomationTrace.textContent = '显示 source、batch、proxy、recent tasks 和日志摘录。';
+    elements.detailCliProxySummary.textContent = '显示账号侧 CLIProxy 关联环境、远程文件、同步状态，以及进入维护视图的入口。';
+}
+
+function renderSubscriptionQuotaLayer(account) {
+    const subscription = account.subscription_summary || {};
+    const quota = account.quota_summary || {};
+    elements.detailSubscriptionQuota.innerHTML = `
+        <div class="detail-chip-row">
+            <span class="detail-chip"><strong>${escapeHtml(subscription.subscription_type || 'none')}</strong><span>subscription</span></span>
+            <span class="detail-chip"><strong>${quota.slots_used ?? '-'} / ${quota.slots_total ?? '-'}</strong><span>quota</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(quota.probe_status || account.remote_sync_state || 'unknown')}</strong><span>risk / pending</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(account.last_maintenance_status || 'none')}</strong><span>recent activity</span></span>
+        </div>
+        <p>订阅时间 ${format.date(subscription.subscription_at) || '-'}；最近维护 ${format.date(account.last_maintenance_at) || '-'}；上传目标 ${escapeHtml(account.last_upload_target || '-')}。</p>
+    `;
+}
+
+function renderCoreOpsLayer(account, tokens) {
+    elements.detailCoreOps.innerHTML = `
+        <div class="detail-chip-row">
+            <span class="detail-chip"><strong>${escapeHtml(account.account_id || '-')}</strong><span>account id</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(account.workspace_id || '-')}</strong><span>workspace</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(account.client_id || '-')}</strong><span>client</span></span>
+        </div>
+        <div class="detail-action-grid">
+            <button class="btn btn-primary btn-sm" onclick="refreshToken(${account.id})">刷新 Token</button>
+            <button class="btn btn-secondary btn-sm" onclick="uploadAccount(${account.id})">上传</button>
+            <button class="btn btn-secondary btn-sm" onclick="markSubscription(${account.id})">标记订阅</button>
+            <button class="btn btn-secondary btn-sm" onclick="checkInboxCode(${account.id})">收件箱</button>
+        </div>
+        <p>Access Token：${tokens.access_token ? '已存在' : '缺失'}；Refresh Token：${tokens.refresh_token ? '已存在' : '缺失'}；CPA：${account.export_status_summary?.cpa_uploaded ? '已上传' : '未上传'}。</p>
+        <div>
+            <textarea id="cookies-input-${account.id}" rows="3" style="width:100%;font-size:0.7rem;font-family:var(--font-mono);background:var(--surface-hover);border:1px solid var(--border);border-radius:12px;padding:8px;color:var(--text-primary);resize:vertical;" placeholder="粘贴完整 cookie 字符串，留空则清除">${escapeHtml(account.cookies || '')}</textarea>
+            <button class="btn btn-secondary btn-sm" style="margin-top:8px" onclick="saveCookies(${account.id})">保存 Cookies</button>
+        </div>
+    `;
+}
+
+function renderAutomationTraceLayer(account, tokens) {
+    const recentTask = account.recent_task_summary || {};
+    const trace = account.automation_trace_summary || {};
+    elements.detailAutomationTrace.innerHTML = `
+        <div class="trace-grid">
+            <span class="detail-chip"><strong>${escapeHtml(trace.source || account.platform_source || '-')}</strong><span>source</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(trace.batch_target || account.last_upload_target || '-')}</strong><span>batch target</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(trace.proxy || account.proxy_used || 'default')}</strong><span>proxy</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(trace.recent_task_status || recentTask.status || 'idle')}</strong><span>recent task</span></span>
+        </div>
+        <p>${escapeHtml(trace.recent_task_label || 'No recent account task')}；创建于 ${format.date(recentTask.created_at) || '-'}，完成于 ${format.date(recentTask.completed_at) || '-'}，任务 ID ${escapeHtml(String(recentTask.task_id || '-'))}。</p>
+        <pre>${escapeHtml(trace.log_excerpt || 'No maintenance trace available for this account.')}</pre>
+    `;
+}
+
+function renderCliProxySummaryLayer(account) {
+    const remote = account.remote_inventory_summary || {};
+    const jumpEntry = account.cliproxy_jump_entry || {};
+    elements.detailCliProxySummary.innerHTML = `
+        <div class="cliproxy-grid">
+            <span class="detail-chip"><strong>${escapeHtml(remote.environment_name || account.remote_environment_name || '-')}</strong><span>environment</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(remote.remote_file_id || '-')}</strong><span>remote file</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(remote.sync_state || account.remote_sync_state || '-')}</strong><span>sync</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(remote.probe_status || '-')}</strong><span>probe</span></span>
+        </div>
+        <p>最近探测 ${format.date(remote.last_probed_at) || '-'}；最近发现 ${format.date(remote.last_seen_at) || '-'}；远程账号 ${escapeHtml(remote.remote_account_id || account.account_id || '-')}。</p>
+        <div class="detail-action-grid">
+            ${jumpEntry.href
+                ? `<a class="btn btn-secondary btn-sm" href="${escapeHtml(jumpEntry.href)}">${escapeHtml(jumpEntry.label || 'Open CLIProxy maintenance context')}</a>`
+                : '<span class="detail-chip"><strong>未关联维护运行</strong><span>jump entry</span></span>'}
+            <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(remote.remote_file_id || '')}')">复制 remote file</button>
+        </div>
+    `;
+}
+
+function formatSubscriptionLabel(account) {
+    const subscription = account.subscription_summary || {};
+    const quota = account.quota_summary || {};
+    const subscriptionType = subscription.subscription_type || account.subscription_type || 'none';
+    const slotsUsed = quota.slots_used ?? '-';
+    const slotsTotal = quota.slots_total ?? '-';
+    return `${subscriptionType} · ${slotsUsed}/${slotsTotal}`;
+}
+
+function formatRiskLabel(account) {
+    return account.quota_summary?.probe_status || account.remote_sync_state || account.status || 'unknown';
+}
+
+function formatRecentActivityLabel(account) {
+    return account.last_maintenance_at ? format.date(account.last_maintenance_at) : (format.date(account.last_refresh) || '无记录');
+}
+
+function formatRemoteMaintenanceLabel(account) {
+    return [account.remote_environment_name || '未关联环境', account.last_maintenance_status || '无维护'].join(' · ');
+}
+
+function formatSubscriptionPanel(account) {
+    return `订阅 ${escapeHtml(account.subscription_summary?.subscription_type || account.subscription_type || 'none')}，额度 ${account.quota_summary?.slots_used ?? '-'} / ${account.quota_summary?.slots_total ?? '-'}，状态 ${escapeHtml(account.quota_summary?.probe_status || 'unknown')}`;
+}
+
+function formatRiskPanel(account) {
+    return `风险/待处理 ${escapeHtml(formatRiskLabel(account))}`;
+}
+
+function formatRecentActivityPanel(account) {
+    return `最近活动 ${escapeHtml(formatRecentActivityLabel(account))}`;
+}
+
+function formatRemoteMaintenancePanel(account) {
+    return `${escapeHtml(account.remote_environment_name || '未关联环境')} · ${escapeHtml(account.last_maintenance_status || '未维护')} · ${escapeHtml(account.last_upload_target || '未上传')}`;
 }

@@ -18,7 +18,12 @@ from ...core.openai.token_refresh import refresh_account_token as do_refresh
 from ...core.openai.token_refresh import validate_account_token as do_validate
 from ...core.upload.cpa_upload import generate_token_json, batch_upload_to_cpa, upload_to_cpa
 from ...core.upload.team_manager_upload import upload_to_team_manager, batch_upload_to_team_manager
-from ...core.upload.sub2api_upload import batch_upload_to_sub2api, upload_to_sub2api
+from ...core.upload.sub2api_upload import (
+    batch_upload_to_sub2api,
+    build_sub2api_export_payload,
+    normalize_sub2api_target_type,
+    upload_to_sub2api,
+)
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...database import crud
@@ -69,10 +74,30 @@ class AccountResponse(BaseModel):
         from_attributes = True
 
 
+class AccountWorkbenchListResponse(AccountResponse):
+    platform_source: Optional[str] = None
+    subscription_summary: Optional[dict] = None
+    quota_summary: Optional[dict] = None
+    remote_sync_state: Optional[str] = None
+    remote_environment_name: Optional[str] = None
+    last_maintenance_status: Optional[str] = None
+    last_maintenance_at: Optional[str] = None
+    last_upload_target: Optional[str] = None
+
+
+class AccountWorkbenchDetailResponse(AccountWorkbenchListResponse):
+    export_status_summary: Optional[dict] = None
+    billing_status_summary: Optional[dict] = None
+    remote_inventory_summary: Optional[dict] = None
+    recent_task_summary: Optional[dict] = None
+    cliproxy_jump_entry: Optional[dict] = None
+    automation_trace_summary: Optional[dict] = None
+
+
 class AccountListResponse(BaseModel):
     """账号列表响应"""
     total: int
-    accounts: List[AccountResponse]
+    accounts: List[AccountWorkbenchListResponse]
 
 
 class AccountUpdateRequest(BaseModel):
@@ -146,6 +171,36 @@ def account_to_response(account: Account) -> AccountResponse:
     )
 
 
+def account_to_list_response(account: Account, workbench_summary: Optional[dict] = None) -> AccountWorkbenchListResponse:
+    base = account_to_response(account).model_dump()
+    workbench_summary = workbench_summary or {}
+    return AccountWorkbenchListResponse(
+        **base,
+        platform_source=workbench_summary.get("platform_source"),
+        subscription_summary=workbench_summary.get("subscription_summary"),
+        quota_summary=workbench_summary.get("quota_summary"),
+        remote_sync_state=workbench_summary.get("remote_sync_state"),
+        remote_environment_name=workbench_summary.get("remote_environment_name"),
+        last_maintenance_status=workbench_summary.get("last_maintenance_status"),
+        last_maintenance_at=workbench_summary.get("last_maintenance_at"),
+        last_upload_target=workbench_summary.get("last_upload_target"),
+    )
+
+
+def account_to_detail_response(account: Account, workbench_summary: Optional[dict] = None) -> AccountWorkbenchDetailResponse:
+    list_payload = account_to_list_response(account, workbench_summary).model_dump()
+    workbench_summary = workbench_summary or {}
+    return AccountWorkbenchDetailResponse(
+        **list_payload,
+        export_status_summary=workbench_summary.get("export_status_summary"),
+        billing_status_summary=workbench_summary.get("billing_status_summary"),
+        remote_inventory_summary=workbench_summary.get("remote_inventory_summary"),
+        recent_task_summary=workbench_summary.get("recent_task_summary"),
+        cliproxy_jump_entry=workbench_summary.get("cliproxy_jump_entry"),
+        automation_trace_summary=workbench_summary.get("automation_trace_summary"),
+    )
+
+
 # ============== API Endpoints ==============
 
 @router.get("", response_model=AccountListResponse)
@@ -187,21 +242,23 @@ async def list_accounts(
         # 分页
         offset = (page - 1) * page_size
         accounts = query.order_by(Account.created_at.desc()).offset(offset).limit(page_size).all()
+        workbench_summaries = crud.get_account_workbench_list_summaries(db, [acc.id for acc in accounts])
 
         return AccountListResponse(
             total=total,
-            accounts=[account_to_response(acc) for acc in accounts]
+            accounts=[account_to_list_response(acc, workbench_summaries.get(acc.id)) for acc in accounts]
         )
 
 
-@router.get("/{account_id}", response_model=AccountResponse)
+@router.get("/{account_id}", response_model=AccountWorkbenchDetailResponse)
 async def get_account(account_id: int):
     """获取单个账号详情"""
     with get_db() as db:
         account = crud.get_account_by_id(db, account_id)
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
-        return account_to_response(account)
+        workbench_summary = crud.get_account_workbench_detail_summary(db, account.id)
+        return account_to_detail_response(account, workbench_summary)
 
 
 @router.get("/{account_id}/tokens")
@@ -331,6 +388,7 @@ class BatchExportRequest(BaseModel):
     status_filter: Optional[str] = None
     email_service_filter: Optional[str] = None
     search_filter: Optional[str] = None
+    service_id: Optional[int] = None
 
 
 @router.post("/export/json")
@@ -436,41 +494,17 @@ async def export_accounts_csv(request: BatchExportRequest):
 async def export_accounts_sub2api(request: BatchExportRequest):
     """导出账号为 Sub2Api 格式（所有选中账号合并到一个 JSON 的 accounts 数组中）"""
 
-    def make_account_entry(acc) -> dict:
-        expires_at = int(acc.expires_at.timestamp()) if acc.expires_at else 0
-        return {
-            "name": acc.email,
-            "platform": "openai",
-            "type": "oauth",
-            "credentials": {
-                "access_token": acc.access_token or "",
-                "chatgpt_account_id": acc.account_id or "",
-                "chatgpt_user_id": "",
-                "client_id": acc.client_id or "",
-                "expires_at": expires_at,
-                "expires_in": 863999,
-                "model_mapping": {
-                    "gpt-5.1": "gpt-5.1",
-                    "gpt-5.1-codex": "gpt-5.1-codex",
-                    "gpt-5.1-codex-max": "gpt-5.1-codex-max",
-                    "gpt-5.1-codex-mini": "gpt-5.1-codex-mini",
-                    "gpt-5.2": "gpt-5.2",
-                    "gpt-5.2-codex": "gpt-5.2-codex",
-                    "gpt-5.3": "gpt-5.3",
-                    "gpt-5.3-codex": "gpt-5.3-codex",
-                    "gpt-5.4": "gpt-5.4"
-                },
-                "organization_id": acc.workspace_id or "",
-                "refresh_token": acc.refresh_token or ""
-            },
-            "extra": {},
-            "concurrency": 10,
-            "priority": 1,
-            "rate_multiplier": 1,
-            "auto_pause_on_expired": True
-        }
-
     with get_db() as db:
+        target_type = "sub2api"
+        if request.service_id:
+            svc = crud.get_sub2api_service_by_id(db, request.service_id)
+            if not svc:
+                raise HTTPException(status_code=404, detail="指定的 Sub2API 服务不存在")
+            try:
+                target_type = normalize_sub2api_target_type(getattr(svc, "target_type", "sub2api"))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
         ids = resolve_account_ids(
             db, request.ids, request.select_all,
             request.status_filter, request.email_service_filter, request.search_filter
@@ -478,10 +512,7 @@ async def export_accounts_sub2api(request: BatchExportRequest):
         accounts = db.query(Account).filter(Account.id.in_(ids)).all()
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        payload = {
-            "proxies": [],
-            "accounts": [make_account_entry(acc) for acc in accounts]
-        }
+        payload = build_sub2api_export_payload(accounts, concurrency=10, priority=1, target_type=target_type)
         content = json.dumps(payload, ensure_ascii=False, indent=2)
 
         if len(accounts) == 1:
@@ -824,12 +855,23 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
                 raise HTTPException(status_code=404, detail="指定的 Sub2API 服务不存在")
             api_url = svc.api_url
             api_key = svc.api_key
+            try:
+                target_type = normalize_sub2api_target_type(getattr(svc, "target_type", "sub2api"))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         with get_db() as db:
             svcs = crud.get_sub2api_services(db, enabled=True)
             if svcs:
                 api_url = svcs[0].api_url
                 api_key = svcs[0].api_key
+                try:
+                    target_type = normalize_sub2api_target_type(getattr(svcs[0], "target_type", "sub2api"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if 'target_type' not in locals():
+        target_type = "sub2api"
 
     if not api_url or not api_key:
         raise HTTPException(status_code=400, detail="未找到可用的 Sub2API 服务，请先在设置中配置")
@@ -844,6 +886,7 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
         ids, api_url, api_key,
         concurrency=request.concurrency,
         priority=request.priority,
+        target_type=target_type,
     )
     return results
 
@@ -851,6 +894,9 @@ async def batch_upload_accounts_to_sub2api(request: BatchSub2ApiUploadRequest):
 @router.post("/{account_id}/upload-sub2api")
 async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUploadRequest] = Body(default=None)):
     """上传单个账号到 Sub2API"""
+
+    if not isinstance(request, Sub2ApiUploadRequest):
+        request = None
 
     service_id = request.service_id if request else None
     concurrency = request.concurrency if request else 3
@@ -865,12 +911,23 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
                 raise HTTPException(status_code=404, detail="指定的 Sub2API 服务不存在")
             api_url = svc.api_url
             api_key = svc.api_key
+            try:
+                target_type = normalize_sub2api_target_type(getattr(svc, "target_type", "sub2api"))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
     else:
         with get_db() as db:
             svcs = crud.get_sub2api_services(db, enabled=True)
             if svcs:
                 api_url = svcs[0].api_url
                 api_key = svcs[0].api_key
+                try:
+                    target_type = normalize_sub2api_target_type(getattr(svcs[0], "target_type", "sub2api"))
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if 'target_type' not in locals():
+        target_type = "sub2api"
 
     if not api_url or not api_key:
         raise HTTPException(status_code=400, detail="未找到可用的 Sub2API 服务，请先在设置中配置")
@@ -884,7 +941,7 @@ async def upload_account_to_sub2api(account_id: int, request: Optional[Sub2ApiUp
 
         success, message = upload_to_sub2api(
             [account], api_url, api_key,
-            concurrency=concurrency, priority=priority
+            concurrency=concurrency, priority=priority, target_type=target_type
         )
         if success:
             return {"success": True, "message": message}

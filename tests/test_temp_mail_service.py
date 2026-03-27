@@ -1,3 +1,4 @@
+from src.core.utils import calculate_sha256
 from src.services.temp_mail import TempMailService
 
 
@@ -105,13 +106,64 @@ def test_get_verification_code_reauths_with_address_password_after_401():
     assert login_call["url"] == "https://mail.example.com/api/address_login"
     assert login_call["kwargs"]["json"] == {
         "email": "tester@example.com",
-        "password": "59b3e8d637cf97edbe2384cf59cb7453dfe30789f5c9564ec0f5535614cde35f",
+        "password": calculate_sha256("plain-password"),
     }
     assert login_call["kwargs"]["headers"]["x-custom-auth"] == "site-secret"
 
     second_mail_call = fake_client.calls[2]
     assert second_mail_call["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
     assert second_mail_call["kwargs"]["headers"]["x-custom-auth"] == "site-secret"
+
+
+def test_get_verification_code_reauths_after_401_without_matching_error_text():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "site_password": "site-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "tester@example.com"}),
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": 1,
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "Your verification code",
+                        "raw": "Subject: Your verification code\n\nYour OpenAI verification code is 123456",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "stale-jwt",
+        "password": "plain-password",
+    }
+
+    original_make_request = service._make_request
+    state = {"raised": False}
+
+    def fake_make_request(method, path, **kwargs):
+        if path == "/api/mails" and not state["raised"]:
+            state["raised"] = True
+            from src.services.base import EmailServiceError
+
+            error = EmailServiceError("expired bearer token")
+            error.status_code = 401
+            raise error
+        return original_make_request(method, path, **kwargs)
+
+    service._make_request = fake_make_request
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "123456"
+    assert fake_client.calls[0]["url"] == "https://mail.example.com/api/address_login"
+    assert fake_client.calls[1]["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
 
 
 def test_get_verification_code_skips_previously_used_code_until_new_code_arrives():
@@ -292,3 +344,84 @@ def test_get_verification_code_matches_inline_login_code_format():
     code = service.get_verification_code("tester@example.com", timeout=1)
 
     assert code == "636051"
+
+
+def test_extract_mail_fields_uses_mime_date_when_list_timestamp_missing():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+
+    parsed = service._extract_mail_fields({
+        "id": "mail-1",
+        "raw": "Date: Fri, 27 Mar 2026 10:00:20 +0000\nSubject: Your verification code\n\nYour OpenAI verification code is 222222",
+    })
+
+    assert parsed["subject"] == "Your verification code"
+    assert parsed["body"].endswith("Your OpenAI verification code is 222222")
+    assert parsed["timestamp"] == 1774605620.0
+
+
+def test_delete_email_clears_mailbox_dedupe_state():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "service_id": "tester@example.com",
+        "id": "tester@example.com",
+    }
+    service._used_codes["tester@example.com"] = {"111111"}
+    service._used_mail_ids["tester@example.com"] = {"mail-1"}
+
+    deleted = service.delete_email("tester@example.com")
+
+    assert deleted is True
+    assert "tester@example.com" not in service._email_cache
+    assert "tester@example.com" not in service._used_codes
+    assert "tester@example.com" not in service._used_mail_ids
+
+
+def test_reusing_same_address_can_fetch_valid_otp_after_cleanup():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "service_id": "tester@example.com",
+        "id": "tester@example.com",
+    }
+    service._used_codes["tester@example.com"] = {"111111"}
+    service._used_mail_ids["tester@example.com"] = {"mail-1"}
+    service.delete_email("tester@example.com")
+
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "results": [
+                    {
+                        "id": "mail-1",
+                        "source": "OpenAI <noreply@openai.com>",
+                        "subject": "Your verification code",
+                        "raw": "Subject: Your verification code\n\nYour OpenAI verification code is 111111",
+                    }
+                ]
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    service._email_cache["tester@example.com"] = {
+        "email": "tester@example.com",
+        "jwt": "fresh-jwt",
+        "password": "plain-password",
+        "service_id": "tester@example.com",
+    }
+
+    code = service.get_verification_code("tester@example.com", timeout=1)
+
+    assert code == "111111"

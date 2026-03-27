@@ -35,6 +35,7 @@ _task_status: Dict[str, dict] = {}
 
 # 任务取消标志
 _task_cancelled: Dict[str, bool] = {}
+_maintenance_run_threads: Dict[int, threading.Thread] = {}
 
 # 批量任务状态 (batch_id -> dict)
 _batch_status: Dict[str, dict] = {}
@@ -208,6 +209,15 @@ class TaskManager:
         # 只清理取消标志
         if task_uuid in _task_cancelled:
             del _task_cancelled[task_uuid]
+
+    def register_maintenance_run(self, run_id: int, worker: threading.Thread):
+        _maintenance_run_threads[run_id] = worker
+
+    def unregister_maintenance_run(self, run_id: int):
+        _maintenance_run_threads.pop(run_id, None)
+
+    def has_maintenance_run(self, run_id: int) -> bool:
+        return run_id in _maintenance_run_threads
 
     # ============== 批量任务管理 ==============
 

@@ -4,9 +4,10 @@
 
 // 状态
 let outlookServices = [];
-let customServices = [];  // 合并 moe_mail + temp_mail + duck_mail + freemail + imap_mail
+let customServices = [];  // 合并 moe_mail + temp_mail + duck_mail + cloudmail + freemail + imap_mail
 let selectedOutlook = new Set();
 let selectedCustom = new Set();
+const serviceNameById = new Map();
 
 // DOM 元素
 const elements = {
@@ -51,6 +52,7 @@ const elements = {
     addMoemailFields: document.getElementById('add-moemail-fields'),
     addTempmailFields: document.getElementById('add-tempmail-fields'),
     addDuckmailFields: document.getElementById('add-duckmail-fields'),
+    addCloudmailFields: document.getElementById('add-cloudmail-fields'),
     addFreemailFields: document.getElementById('add-freemail-fields'),
     addImapFields: document.getElementById('add-imap-fields'),
 
@@ -62,6 +64,7 @@ const elements = {
     editMoemailFields: document.getElementById('edit-moemail-fields'),
     editTempmailFields: document.getElementById('edit-tempmail-fields'),
     editDuckmailFields: document.getElementById('edit-duckmail-fields'),
+    editCloudmailFields: document.getElementById('edit-cloudmail-fields'),
     editFreemailFields: document.getElementById('edit-freemail-fields'),
     editImapFields: document.getElementById('edit-imap-fields'),
     editCustomTypeBadge: document.getElementById('edit-custom-type-badge'),
@@ -78,6 +81,7 @@ const CUSTOM_SUBTYPE_LABELS = {
     moemail: '🔗 MoeMail（自定义域名 API）',
     tempmail: '📮 TempMail（自部署 Cloudflare Worker）',
     duckmail: '🦆 DuckMail（DuckMail API）',
+    cloudmail: 'CloudMail（自部署 Worker）',
     freemail: 'Freemail（自部署 Cloudflare Worker）',
     imap: '📧 IMAP 邮箱（Gmail/QQ/163等）'
 };
@@ -150,11 +154,14 @@ function initEventListeners() {
     elements.closeEditCustomModal.addEventListener('click', () => elements.editCustomModal.classList.remove('active'));
     elements.cancelEditCustom.addEventListener('click', () => elements.editCustomModal.classList.remove('active'));
     elements.editCustomForm.addEventListener('submit', handleEditCustom);
+    document.getElementById('edit-custom-enabled')?.addEventListener('change', toggleSecretClearAvailability);
 
     // 编辑 Outlook
     elements.closeEditOutlookModal.addEventListener('click', () => elements.editOutlookModal.classList.remove('active'));
     elements.cancelEditOutlook.addEventListener('click', () => elements.editOutlookModal.classList.remove('active'));
     elements.editOutlookForm.addEventListener('submit', handleEditOutlook);
+    document.getElementById('edit-outlook-enabled')?.addEventListener('change', toggleSecretClearAvailability);
+    document.getElementById('edit-outlook-client-id')?.addEventListener('input', toggleSecretClearAvailability);
 
     // 临时邮箱配置
     elements.tempmailForm.addEventListener('submit', handleSaveTempmail);
@@ -184,6 +191,7 @@ function switchAddSubType(subType) {
     elements.addMoemailFields.style.display = subType === 'moemail' ? '' : 'none';
     elements.addTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
     elements.addDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
+    elements.addCloudmailFields.style.display = subType === 'cloudmail' ? '' : 'none';
     elements.addFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.addImapFields.style.display = subType === 'imap' ? '' : 'none';
 }
@@ -194,6 +202,7 @@ function switchEditSubType(subType) {
     elements.editMoemailFields.style.display = subType === 'moemail' ? '' : 'none';
     elements.editTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
     elements.editDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
+    elements.editCloudmailFields.style.display = subType === 'cloudmail' ? '' : 'none';
     elements.editFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.editImapFields.style.display = subType === 'imap' ? '' : 'none';
     elements.editCustomTypeBadge.textContent = CUSTOM_SUBTYPE_LABELS[subType] || CUSTOM_SUBTYPE_LABELS.moemail;
@@ -204,7 +213,7 @@ async function loadStats() {
     try {
         const data = await api.get('/email-services/stats');
         elements.outlookCount.textContent = data.outlook_count || 0;
-        elements.customCount.textContent = (data.custom_count || 0) + (data.temp_mail_count || 0) + (data.duck_mail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
+        elements.customCount.textContent = (data.custom_count || 0) + (data.temp_mail_count || 0) + (data.duck_mail_count || 0) + (data.cloudmail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
         elements.tempmailStatus.textContent = data.tempmail_available ? '可用' : '不可用';
         elements.totalEnabled.textContent = data.enabled_count || 0;
     } catch (error) {
@@ -217,6 +226,7 @@ async function loadOutlookServices() {
     try {
         const data = await api.get('/email-services?service_type=outlook');
         outlookServices = data.services || [];
+        updateServiceNameCache();
 
         if (outlookServices.length === 0) {
             elements.outlookTable.innerHTML = `
@@ -247,15 +257,15 @@ async function loadOutlookServices() {
                 <td>${format.date(service.last_used)}</td>
                 <td>
                     <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">
-                        <button class="btn btn-secondary btn-sm" onclick="editOutlookService(${service.id})">编辑</button>
+                        <button class="btn btn-secondary btn-sm" data-action="edit-outlook" data-service-id="${service.id}">编辑</button>
                         <div class="dropdown" style="position:relative;">
-                            <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleEmailMoreMenu(this)">更多</button>
+                            <button class="btn btn-secondary btn-sm" data-action="toggle-menu">更多</button>
                             <div class="dropdown-menu" style="min-width:80px;">
-                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);toggleService(${service.id}, ${!service.enabled})">${service.enabled ? '禁用' : '启用'}</a>
-                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);testService(${service.id})">测试</a>
+                                <a href="#" class="dropdown-item" data-action="toggle-service" data-service-id="${service.id}" data-enabled="${!service.enabled}">${service.enabled ? '禁用' : '启用'}</a>
+                                <a href="#" class="dropdown-item" data-action="test-service" data-service-id="${service.id}">测试</a>
                             </div>
                         </div>
-                        <button class="btn btn-danger btn-sm" onclick="deleteService(${service.id}, '${escapeHtml(service.name)}')">删除</button>
+                        <button class="btn btn-danger btn-sm" data-action="delete-service" data-service-id="${service.id}">删除</button>
                     </div>
                 </td>
             </tr>
@@ -269,6 +279,7 @@ async function loadOutlookServices() {
                 updateBatchButtons();
             });
         });
+        setupServiceActionHandlers(elements.outlookTable);
 
     } catch (error) {
         console.error('加载 Outlook 服务失败:', error);
@@ -285,6 +296,9 @@ function getCustomServiceTypeBadge(subType) {
     }
     if (subType === 'duckmail') {
         return '<span class="status-badge success">DuckMail</span>';
+    }
+    if (subType === 'cloudmail') {
+        return '<span class="status-badge" style="background-color:#2e7d32;color:white;">CloudMail</span>';
     }
     if (subType === 'freemail') {
         return '<span class="status-badge" style="background-color:#9c27b0;color:white;">Freemail</span>';
@@ -306,13 +320,14 @@ function getCustomServiceAddress(service) {
     return `${escapeHtml(baseUrl)}<div style="color: var(--text-muted); margin-top: 4px;">默认域名：@${escapeHtml(domain)}</div>`;
 }
 
-// 加载自定义邮箱服务（moe_mail + temp_mail + duck_mail + freemail 合并）
+// 加载自定义邮箱服务（moe_mail + temp_mail + duck_mail + cloudmail + freemail 合并）
 async function loadCustomServices() {
     try {
-        const [r1, r2, r3, r4, r5] = await Promise.all([
+        const [r1, r2, r3, r4, r5, r6] = await Promise.all([
             api.get('/email-services?service_type=moe_mail'),
             api.get('/email-services?service_type=temp_mail'),
             api.get('/email-services?service_type=duck_mail'),
+            api.get('/email-services?service_type=cloudmail'),
             api.get('/email-services?service_type=freemail'),
             api.get('/email-services?service_type=imap_mail')
         ]);
@@ -320,9 +335,11 @@ async function loadCustomServices() {
             ...(r1.services || []).map(s => ({ ...s, _subType: 'moemail' })),
             ...(r2.services || []).map(s => ({ ...s, _subType: 'tempmail' })),
             ...(r3.services || []).map(s => ({ ...s, _subType: 'duckmail' })),
-            ...(r4.services || []).map(s => ({ ...s, _subType: 'freemail' })),
-            ...(r5.services || []).map(s => ({ ...s, _subType: 'imap' }))
+            ...(r4.services || []).map(s => ({ ...s, _subType: 'cloudmail' })),
+            ...(r5.services || []).map(s => ({ ...s, _subType: 'freemail' })),
+            ...(r6.services || []).map(s => ({ ...s, _subType: 'imap' }))
         ];
+        updateServiceNameCache();
 
         if (customServices.length === 0) {
             elements.customTable.innerHTML = `
@@ -351,15 +368,15 @@ async function loadCustomServices() {
                 <td>${format.date(service.last_used)}</td>
                 <td>
                     <div style="display:flex;gap:4px;align-items:center;white-space:nowrap;">
-                        <button class="btn btn-secondary btn-sm" onclick="editCustomService(${service.id}, '${service._subType}')">编辑</button>
+                        <button class="btn btn-secondary btn-sm" data-action="edit-custom" data-service-id="${service.id}" data-sub-type="${service._subType}">编辑</button>
                         <div class="dropdown" style="position:relative;">
-                            <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation();toggleEmailMoreMenu(this)">更多</button>
+                            <button class="btn btn-secondary btn-sm" data-action="toggle-menu">更多</button>
                             <div class="dropdown-menu" style="min-width:80px;">
-                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);toggleService(${service.id}, ${!service.enabled})">${service.enabled ? '禁用' : '启用'}</a>
-                                <a href="#" class="dropdown-item" onclick="event.preventDefault();closeEmailMoreMenu(this);testService(${service.id})">测试</a>
+                                <a href="#" class="dropdown-item" data-action="toggle-service" data-service-id="${service.id}" data-enabled="${!service.enabled}">${service.enabled ? '禁用' : '启用'}</a>
+                                <a href="#" class="dropdown-item" data-action="test-service" data-service-id="${service.id}">测试</a>
                             </div>
                         </div>
-                        <button class="btn btn-danger btn-sm" onclick="deleteService(${service.id}, '${escapeHtml(service.name)}')">删除</button>
+                        <button class="btn btn-danger btn-sm" data-action="delete-service" data-service-id="${service.id}">删除</button>
                     </div>
                 </td>
             </tr>`;
@@ -372,6 +389,7 @@ async function loadCustomServices() {
                 else selectedCustom.delete(id);
             });
         });
+        setupServiceActionHandlers(elements.customTable);
 
     } catch (error) {
         console.error('加载自定义邮箱服务失败:', error);
@@ -461,6 +479,13 @@ async function handleAddCustom(e) {
             default_domain: formData.get('dm_domain'),
             password_length: parseInt(formData.get('dm_password_length'), 10) || 12
         };
+    } else if (subType === 'cloudmail') {
+        serviceType = 'cloudmail';
+        config = {
+            base_url: formData.get('cm_base_url'),
+            admin_token: formData.get('cm_admin_token'),
+            domain: formData.get('cm_domain')
+        };
     } else if (subType === 'freemail') {
         serviceType = 'freemail';
         config = {
@@ -517,7 +542,7 @@ async function testService(id) {
     try {
         const result = await api.post(`/email-services/${id}/test`);
         if (result.success) toast.success('测试成功');
-        else toast.error('测试失败: ' + (result.error || '未知错误'));
+        else toast.error('测试失败: ' + (result.message || '未知错误'));
     } catch (error) {
         toast.error('测试失败: ' + error.message);
     }
@@ -606,9 +631,97 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
+function updateServiceNameCache() {
+    serviceNameById.clear();
+    [...outlookServices, ...customServices].forEach(service => {
+        serviceNameById.set(String(service.id), service.name || '');
+    });
+}
+
+function setupServiceActionHandlers(tableElement) {
+    tableElement.querySelectorAll('[data-action="edit-outlook"]').forEach(btn => {
+        btn.addEventListener('click', () => editOutlookService(parseInt(btn.dataset.serviceId, 10)));
+    });
+    tableElement.querySelectorAll('[data-action="edit-custom"]').forEach(btn => {
+        btn.addEventListener('click', () => editCustomService(parseInt(btn.dataset.serviceId, 10), btn.dataset.subType));
+    });
+    tableElement.querySelectorAll('[data-action="toggle-menu"]').forEach(btn => {
+        btn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            toggleEmailMoreMenu(btn);
+        });
+    });
+    tableElement.querySelectorAll('[data-action="toggle-service"]').forEach(link => {
+        link.addEventListener('click', (event) => {
+            event.preventDefault();
+            closeEmailMoreMenu(link);
+            toggleService(parseInt(link.dataset.serviceId, 10), link.dataset.enabled === 'true');
+        });
+    });
+    tableElement.querySelectorAll('[data-action="test-service"]').forEach(link => {
+        link.addEventListener('click', (event) => {
+            event.preventDefault();
+            closeEmailMoreMenu(link);
+            testService(parseInt(link.dataset.serviceId, 10));
+        });
+    });
+    tableElement.querySelectorAll('[data-action="delete-service"]').forEach(btn => {
+        btn.addEventListener('click', handleDeleteServiceClick);
+    });
+}
+
+async function handleDeleteServiceClick(event) {
+    const button = event.currentTarget;
+    const serviceId = parseInt(button.dataset.serviceId, 10);
+    const serviceName = serviceNameById.get(String(serviceId)) || '';
+    await deleteService(serviceId, serviceName);
+}
+
+function applySecretFieldState(inputId, clearId, hasSecret, placeholderWhenMissing, placeholderWhenPresent = '已设置，留空保持不变') {
+    const input = document.getElementById(inputId);
+    const clearCheckbox = document.getElementById(clearId);
+    if (!input || !clearCheckbox) return;
+
+    input.value = '';
+    clearCheckbox.checked = false;
+    input.placeholder = hasSecret ? placeholderWhenPresent : placeholderWhenMissing;
+
+    clearCheckbox.onchange = () => {
+        input.value = '';
+        input.placeholder = clearCheckbox.checked ? '将清除已保存的密钥' : (hasSecret ? placeholderWhenPresent : placeholderWhenMissing);
+    };
+}
+
+function setSecretClearEnabled(clearId, enabled, reason = '') {
+    const checkbox = document.getElementById(clearId);
+    if (!checkbox) return;
+    checkbox.checked = enabled ? checkbox.checked : false;
+    checkbox.disabled = !enabled;
+    checkbox.title = enabled ? '' : reason;
+}
+
+function toggleSecretClearAvailability() {
+    const outlookEnabled = document.getElementById('edit-outlook-enabled')?.checked;
+    const hasClientId = !!document.getElementById('edit-outlook-client-id')?.value.trim();
+    setSecretClearEnabled(
+        'edit-outlook-clear-refresh-token',
+        !outlookEnabled || hasClientId,
+        '启用状态下需要保留可用的 OAuth 路径'
+    );
+
+    const customEnabled = document.getElementById('edit-custom-enabled')?.checked;
+    const subType = document.getElementById('edit-custom-sub-type-hidden')?.value;
+    const isEnabled = !!customEnabled;
+
+    setSecretClearEnabled('edit-cm-clear-admin-token', !isEnabled || subType !== 'cloudmail', '启用的 CloudMail 服务不能清除 Admin Token');
+    setSecretClearEnabled('edit-fm-clear-admin-token', !isEnabled || subType !== 'freemail', '启用的 Freemail 服务不能清除 Admin Token');
+    setSecretClearEnabled('edit-tm-clear-admin-password', !isEnabled || subType !== 'tempmail', '启用的 TempMail 服务不能清除 Admin 密码');
+    setSecretClearEnabled('edit-imap-clear-password', !isEnabled || subType !== 'imap', '启用的 IMAP 服务不能清除密码');
+}
+
 // ============== 编辑功能 ==============
 
-// 编辑自定义邮箱服务（支持 moemail / tempmail / duckmail）
+// 编辑自定义邮箱服务（支持 moemail / tempmail / duckmail / cloudmail）
 async function editCustomService(id, subType) {
     try {
         const service = await api.get(`/email-services/${id}/full`);
@@ -617,6 +730,8 @@ async function editCustomService(id, subType) {
                 ? 'tempmail'
                 : service.service_type === 'duck_mail'
                     ? 'duckmail'
+                    : service.service_type === 'cloudmail'
+                        ? 'cloudmail'
                     : service.service_type === 'freemail'
                         ? 'freemail'
                         : service.service_type === 'imap_mail'
@@ -633,35 +748,35 @@ async function editCustomService(id, subType) {
 
         if (resolvedSubType === 'moemail') {
             document.getElementById('edit-custom-api-url').value = service.config?.base_url || '';
-            document.getElementById('edit-custom-api-key').value = '';
-            document.getElementById('edit-custom-api-key').placeholder = service.config?.api_key ? '已设置，留空保持不变' : 'API Key';
             document.getElementById('edit-custom-domain').value = service.config?.default_domain || service.config?.domain || '';
         } else if (resolvedSubType === 'tempmail') {
             document.getElementById('edit-tm-base-url').value = service.config?.base_url || '';
-            document.getElementById('edit-tm-admin-password').value = '';
-            document.getElementById('edit-tm-admin-password').placeholder = service.config?.admin_password ? '已设置，留空保持不变' : '请输入 Admin 密码';
-            document.getElementById('edit-tm-site-password').value = '';
-            document.getElementById('edit-tm-site-password').placeholder = service.config?.site_password ? '已设置，留空保持不变' : '留空表示站点未启用全局密码';
             document.getElementById('edit-tm-domain').value = service.config?.domain || '';
         } else if (resolvedSubType === 'duckmail') {
             document.getElementById('edit-dm-base-url').value = service.config?.base_url || '';
-            document.getElementById('edit-dm-api-key').value = '';
-            document.getElementById('edit-dm-api-key').placeholder = service.config?.api_key ? '已设置，留空保持不变' : '请输入 API Key（可选）';
             document.getElementById('edit-dm-domain').value = service.config?.default_domain || '';
             document.getElementById('edit-dm-password-length').value = service.config?.password_length || 12;
+        } else if (resolvedSubType === 'cloudmail') {
+            document.getElementById('edit-cm-base-url').value = service.config?.base_url || '';
+            document.getElementById('edit-cm-domain').value = service.config?.domain || '';
         } else if (resolvedSubType === 'freemail') {
             document.getElementById('edit-fm-base-url').value = service.config?.base_url || '';
-            document.getElementById('edit-fm-admin-token').value = '';
-            document.getElementById('edit-fm-admin-token').placeholder = service.config?.admin_token ? '已设置，留空保持不变' : '请输入 Admin Token';
             document.getElementById('edit-fm-domain').value = service.config?.domain || '';
         } else {
             document.getElementById('edit-imap-host').value = service.config?.host || '';
             document.getElementById('edit-imap-port').value = service.config?.port || 993;
             document.getElementById('edit-imap-use-ssl').value = service.config?.use_ssl !== false ? 'true' : 'false';
             document.getElementById('edit-imap-email').value = service.config?.email || '';
-            document.getElementById('edit-imap-password').value = '';
-            document.getElementById('edit-imap-password').placeholder = service.config?.password ? '已设置，留空保持不变' : '请输入密码/授权码';
         }
+
+        applySecretFieldState('edit-custom-api-key', 'edit-custom-clear-api-key', service.config?.has_api_key, 'API Key');
+        applySecretFieldState('edit-tm-admin-password', 'edit-tm-clear-admin-password', service.config?.has_admin_password, '请输入 Admin 密码');
+        applySecretFieldState('edit-tm-site-password', 'edit-tm-clear-site-password', service.config?.has_site_password, '留空表示站点未启用全局密码');
+        applySecretFieldState('edit-dm-api-key', 'edit-dm-clear-api-key', service.config?.has_api_key, '请输入 API Key（可选）');
+        applySecretFieldState('edit-cm-admin-token', 'edit-cm-clear-admin-token', service.config?.has_admin_token, '请输入 Admin Token');
+        applySecretFieldState('edit-fm-admin-token', 'edit-fm-clear-admin-token', service.config?.has_admin_token, '请输入 Admin Token');
+        applySecretFieldState('edit-imap-password', 'edit-imap-clear-password', service.config?.has_password, '请输入密码/授权码');
+        toggleSecretClearAvailability();
 
         elements.editCustomModal.classList.add('active');
     } catch (error) {
@@ -683,7 +798,8 @@ async function handleEditCustom(e) {
             default_domain: formData.get('domain')
         };
         const apiKey = formData.get('api_key');
-        if (apiKey && apiKey.trim()) config.api_key = apiKey.trim();
+        if (document.getElementById('edit-custom-clear-api-key').checked) config.api_key = null;
+        else if (apiKey && apiKey.trim()) config.api_key = apiKey.trim();
     } else if (subType === 'tempmail') {
         config = {
             base_url: formData.get('tm_base_url'),
@@ -691,9 +807,11 @@ async function handleEditCustom(e) {
             enable_prefix: true
         };
         const adminPwd = formData.get('tm_admin_password');
-        if (adminPwd && adminPwd.trim()) config.admin_password = adminPwd.trim();
+        if (document.getElementById('edit-tm-clear-admin-password').checked) config.admin_password = null;
+        else if (adminPwd && adminPwd.trim()) config.admin_password = adminPwd.trim();
         const pwd = formData.get('tm_site_password');
-        if (pwd && pwd.trim()) config.site_password = pwd.trim();
+        if (document.getElementById('edit-tm-clear-site-password').checked) config.site_password = null;
+        else if (pwd && pwd.trim()) config.site_password = pwd.trim();
     } else if (subType === 'duckmail') {
         config = {
             base_url: formData.get('dm_base_url'),
@@ -701,14 +819,24 @@ async function handleEditCustom(e) {
             password_length: parseInt(formData.get('dm_password_length'), 10) || 12
         };
         const apiKey = formData.get('dm_api_key');
-        if (apiKey && apiKey.trim()) config.api_key = apiKey.trim();
+        if (document.getElementById('edit-dm-clear-api-key').checked) config.api_key = null;
+        else if (apiKey && apiKey.trim()) config.api_key = apiKey.trim();
+    } else if (subType === 'cloudmail') {
+        config = {
+            base_url: formData.get('cm_base_url'),
+            domain: formData.get('cm_domain')
+        };
+        const token = formData.get('cm_admin_token');
+        if (document.getElementById('edit-cm-clear-admin-token').checked) config.admin_token = null;
+        else if (token && token.trim()) config.admin_token = token.trim();
     } else if (subType === 'freemail') {
         config = {
             base_url: formData.get('fm_base_url'),
             domain: formData.get('fm_domain')
         };
         const token = formData.get('fm_admin_token');
-        if (token && token.trim()) config.admin_token = token.trim();
+        if (document.getElementById('edit-fm-clear-admin-token').checked) config.admin_token = null;
+        else if (token && token.trim()) config.admin_token = token.trim();
     } else {
         config = {
             host: formData.get('imap_host'),
@@ -717,7 +845,8 @@ async function handleEditCustom(e) {
             email: formData.get('imap_email')
         };
         const pwd = formData.get('imap_password');
-        if (pwd && pwd.trim()) config.password = pwd.trim();
+        if (document.getElementById('edit-imap-clear-password').checked) config.password = null;
+        else if (pwd && pwd.trim()) config.password = pwd.trim();
     }
 
     const updateData = {
@@ -744,13 +873,12 @@ async function editOutlookService(id) {
         const service = await api.get(`/email-services/${id}/full`);
         document.getElementById('edit-outlook-id').value = service.id;
         document.getElementById('edit-outlook-email').value = service.config?.email || service.name || '';
-        document.getElementById('edit-outlook-password').value = '';
-        document.getElementById('edit-outlook-password').placeholder = service.config?.password ? '已设置，留空保持不变' : '请输入密码';
         document.getElementById('edit-outlook-client-id').value = service.config?.client_id || '';
-        document.getElementById('edit-outlook-refresh-token').value = '';
-        document.getElementById('edit-outlook-refresh-token').placeholder = service.config?.refresh_token ? '已设置，留空保持不变' : 'OAuth Refresh Token';
+        applySecretFieldState('edit-outlook-password', 'edit-outlook-clear-password', service.config?.has_password, '请输入密码');
+        applySecretFieldState('edit-outlook-refresh-token', 'edit-outlook-clear-refresh-token', service.config?.has_refresh_token, 'OAuth Refresh Token');
         document.getElementById('edit-outlook-priority').value = service.priority || 0;
         document.getElementById('edit-outlook-enabled').checked = service.enabled;
+        toggleSecretClearAvailability();
         elements.editOutlookModal.classList.add('active');
     } catch (error) {
         toast.error('获取服务信息失败: ' + error.message);
@@ -762,26 +890,26 @@ async function handleEditOutlook(e) {
     e.preventDefault();
     const id = document.getElementById('edit-outlook-id').value;
     const formData = new FormData(e.target);
-
-    let currentService;
-    try {
-        currentService = await api.get(`/email-services/${id}/full`);
-    } catch (error) {
-        toast.error('获取服务信息失败');
-        return;
-    }
+    const password = formData.get('password')?.trim();
+    const refreshToken = formData.get('refresh_token')?.trim();
+    const clientId = formData.get('client_id')?.trim();
 
     const updateData = {
         name: formData.get('email'),
         priority: parseInt(formData.get('priority')) || 0,
         enabled: formData.get('enabled') === 'on',
         config: {
-            email: formData.get('email'),
-            password: formData.get('password')?.trim() || currentService.config?.password || '',
-            client_id: formData.get('client_id')?.trim() || currentService.config?.client_id || '',
-            refresh_token: formData.get('refresh_token')?.trim() || currentService.config?.refresh_token || ''
+            email: formData.get('email')
         }
     };
+
+    if (clientId) updateData.config.client_id = clientId;
+
+    if (document.getElementById('edit-outlook-clear-password').checked) updateData.config.password = null;
+    else if (password) updateData.config.password = password;
+
+    if (document.getElementById('edit-outlook-clear-refresh-token').checked) updateData.config.refresh_token = null;
+    else if (refreshToken) updateData.config.refresh_token = refreshToken;
 
     try {
         await api.patch(`/email-services/${id}`, updateData);

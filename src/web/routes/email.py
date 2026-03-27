@@ -84,7 +84,7 @@ class OutlookBatchImportResponse(BaseModel):
 # ============== Helper Functions ==============
 
 # 敏感字段列表，返回响应时需要过滤
-SENSITIVE_FIELDS = {'password', 'api_key', 'refresh_token', 'access_token', 'admin_token', 'site_password'}
+SENSITIVE_FIELDS = {'password', 'api_key', 'refresh_token', 'access_token', 'admin_token', 'admin_password', 'site_password'}
 
 def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     """过滤敏感配置信息"""
@@ -121,6 +121,40 @@ def service_to_response(service: EmailServiceModel) -> EmailServiceResponse:
     )
 
 
+def validate_service_config_for_update(service_type: str, config: Dict[str, Any], enabled: bool) -> None:
+    """验证更新后的服务配置是否仍满足启用要求。"""
+    if not enabled:
+        return
+
+    if service_type == "cloudmail":
+        if not config.get("base_url"):
+            raise HTTPException(status_code=400, detail="启用的 CloudMail 服务必须保留 base_url")
+        if not config.get("admin_token"):
+            raise HTTPException(status_code=400, detail="启用的 CloudMail 服务不能清除 admin_token")
+    elif service_type == "freemail":
+        if not config.get("base_url"):
+            raise HTTPException(status_code=400, detail="启用的 Freemail 服务必须保留 base_url")
+        if not config.get("admin_token"):
+            raise HTTPException(status_code=400, detail="启用的 Freemail 服务不能清除 admin_token")
+    elif service_type == "temp_mail":
+        if not config.get("base_url"):
+            raise HTTPException(status_code=400, detail="启用的 TempMail 服务必须保留 base_url")
+        if not config.get("admin_password"):
+            raise HTTPException(status_code=400, detail="启用的 TempMail 服务不能清除 admin_password")
+    elif service_type == "imap_mail":
+        if not config.get("host") or not config.get("email"):
+            raise HTTPException(status_code=400, detail="启用的 IMAP 服务必须保留 host 和 email")
+        if not config.get("password"):
+            raise HTTPException(status_code=400, detail="启用的 IMAP 服务不能清除 password")
+    elif service_type == "outlook":
+        if not config.get("email"):
+            raise HTTPException(status_code=400, detail="启用的 Outlook 服务必须保留 email")
+        has_password_auth = bool(config.get("password"))
+        has_oauth_auth = bool(config.get("client_id") and config.get("refresh_token"))
+        if not has_password_auth and not has_oauth_auth:
+            raise HTTPException(status_code=400, detail="启用的 Outlook 服务必须至少保留一种认证方式（密码或 OAuth）")
+
+
 # ============== API Endpoints ==============
 
 @router.get("/stats")
@@ -145,6 +179,7 @@ async def get_email_services_stats():
             'custom_count': 0,
             'temp_mail_count': 0,
             'duck_mail_count': 0,
+            'cloudmail_count': 0,
             'freemail_count': 0,
             'imap_mail_count': 0,
             'tempmail_available': True,  # 临时邮箱始终可用
@@ -160,6 +195,8 @@ async def get_email_services_stats():
                 stats['temp_mail_count'] = count
             elif service_type == 'duck_mail':
                 stats['duck_mail_count'] = count
+            elif service_type == 'cloudmail':
+                stats['cloudmail_count'] = count
             elif service_type == 'freemail':
                 stats['freemail_count'] = count
             elif service_type == 'imap_mail':
@@ -227,6 +264,16 @@ async def get_service_types():
                 ]
             },
             {
+                "value": "cloudmail",
+                "label": "CloudMail",
+                "description": "CloudMail 自部署 Worker 邮箱服务",
+                "config_fields": [
+                    {"name": "base_url", "label": "API 地址", "required": True, "placeholder": "https://cloudmail.example.com"},
+                    {"name": "admin_token", "label": "Admin Token", "required": True, "secret": True},
+                    {"name": "domain", "label": "邮箱域名", "required": False, "placeholder": "example.com"},
+                ]
+            },
+            {
                 "value": "freemail",
                 "label": "Freemail",
                 "description": "Freemail 自部署 Cloudflare Worker 临时邮箱服务",
@@ -287,7 +334,7 @@ async def get_email_service(service_id: int):
 
 @router.get("/{service_id}/full")
 async def get_email_service_full(service_id: int):
-    """获取单个邮箱服务完整详情（包含敏感字段，用于编辑）"""
+    """获取单个邮箱服务详情（前端编辑使用，敏感字段仅返回存在标记）"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
         if not service:
@@ -299,7 +346,7 @@ async def get_email_service_full(service_id: int):
             "name": service.name,
             "enabled": service.enabled,
             "priority": service.priority,
-            "config": service.config or {},  # 返回完整配置
+            "config": filter_sensitive_config(service.config),
             "last_used": service.last_used.isoformat() if service.last_used else None,
             "created_at": service.created_at.isoformat() if service.created_at else None,
             "updated_at": service.updated_at.isoformat() if service.updated_at else None,
@@ -320,6 +367,8 @@ async def create_email_service(request: EmailServiceCreate):
         existing = db.query(EmailServiceModel).filter(EmailServiceModel.name == request.name).first()
         if existing:
             raise HTTPException(status_code=400, detail="服务名称已存在")
+
+        validate_service_config_for_update(request.service_type, request.config or {}, request.enabled)
 
         service = EmailServiceModel(
             service_type=request.service_type,
@@ -346,13 +395,16 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
         update_data = {}
         if request.name is not None:
             update_data["name"] = request.name
+        final_enabled = request.enabled if request.enabled is not None else service.enabled
+        effective_config = service.config or {}
         if request.config is not None:
             # 合并配置而不是替换
-            current_config = service.config or {}
-            merged_config = {**current_config, **request.config}
-            # 移除空值
-            merged_config = {k: v for k, v in merged_config.items() if v}
+            merged_config = {**effective_config, **request.config}
+            # 仅移除显式置空为 None 的字段，保留空字符串/False/0 以支持主动清空或关闭开关
+            merged_config = {k: v for k, v in merged_config.items() if v is not None}
+            effective_config = merged_config
             update_data["config"] = merged_config
+        validate_service_config_for_update(service.service_type, effective_config, final_enabled)
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:
@@ -423,6 +475,7 @@ async def enable_email_service(service_id: int):
         if not service:
             raise HTTPException(status_code=404, detail="服务不存在")
 
+        validate_service_config_for_update(service.service_type, service.config or {}, True)
         service.enabled = True
         db.commit()
 

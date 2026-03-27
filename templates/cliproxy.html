@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CLIProxyAPI 管理 - OpenAI 注册系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🛰️</text></svg>">
+    <style>
+        .cliproxy-layout {
+            display: grid;
+            grid-template-columns: minmax(300px, 0.95fr) minmax(0, 1.6fr);
+            gap: 20px;
+            align-items: start;
+        }
+        .cliproxy-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-width: 0;
+        }
+        .cliproxy-toolbar,
+        .cliproxy-stat-grid,
+        .cliproxy-action-row,
+        .cliproxy-meta-row,
+        .cliproxy-run-status,
+        .cliproxy-inventory-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        .cliproxy-toolbar {
+            justify-content: space-between;
+        }
+        .cliproxy-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+        }
+        .cliproxy-environment-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .cliproxy-environment-item {
+            width: 100%;
+            text-align: left;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: var(--surface);
+            padding: 14px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            cursor: pointer;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        .cliproxy-environment-item:hover,
+        .cliproxy-environment-item.is-active {
+            border-color: var(--primary);
+            box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
+            transform: translateY(-1px);
+        }
+        .cliproxy-environment-item h4,
+        .cliproxy-section-title,
+        .cliproxy-table-card h3,
+        .cliproxy-form-card h3 {
+            margin: 0;
+        }
+        .cliproxy-environment-item p,
+        .cliproxy-muted,
+        .cliproxy-table-card p,
+        .cliproxy-form-card p,
+        .cliproxy-empty {
+            margin: 0;
+            color: var(--text-secondary);
+        }
+        .cliproxy-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: var(--surface-hover);
+            font-size: 0.78rem;
+            color: var(--text-secondary);
+        }
+        .cliproxy-chip strong {
+            color: var(--text-primary);
+        }
+        .cliproxy-form-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+        }
+        .cliproxy-form-grid .form-group-full {
+            grid-column: 1 / -1;
+        }
+        .cliproxy-table-card {
+            overflow: hidden;
+        }
+        .cliproxy-table-scroll {
+            overflow-x: auto;
+        }
+        .cliproxy-table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 720px;
+        }
+        .cliproxy-table th,
+        .cliproxy-table td {
+            padding: 12px 14px;
+            border-bottom: 1px solid var(--border);
+            text-align: left;
+            vertical-align: top;
+            font-size: 0.9rem;
+        }
+        .cliproxy-table th {
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            background: color-mix(in srgb, var(--surface) 86%, var(--background) 14%);
+        }
+        .cliproxy-table tbody tr:hover {
+            background: color-mix(in srgb, var(--surface-hover) 85%, var(--surface) 15%);
+        }
+        .cliproxy-card-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .cliproxy-connection-result {
+            min-height: 24px;
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+        }
+        .cliproxy-connection-result.is-ok {
+            color: var(--success, #15803d);
+        }
+        .cliproxy-connection-result.is-error {
+            color: var(--danger, #b91c1c);
+        }
+        .cliproxy-empty {
+            padding: 18px;
+            border: 1px dashed var(--border);
+            border-radius: 14px;
+            background: var(--surface);
+        }
+        .cliproxy-code {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+        }
+        @media (max-width: 980px) {
+            .cliproxy-layout {
+                grid-template-columns: 1fr;
+            }
+        }
+        @media (max-width: 720px) {
+            .cliproxy-form-grid {
+                grid-template-columns: 1fr;
+            }
+            .cliproxy-card-header,
+            .cliproxy-toolbar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>OpenAI 注册系统</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link">注册</a>
+                <a href="/accounts" class="nav-link">账号管理</a>
+                <a href="/cliproxy" class="nav-link active">CLIProxyAPI</a>
+                <a href="/email-services" class="nav-link">邮箱服务</a>
+                <a href="/payment" class="nav-link">支付</a>
+                <a href="/settings" class="nav-link">设置</a>
+                <a href="/logout" class="nav-link">退出</a>
+            </div>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">
+                🌙
+            </button>
+        </nav>
+
+        <main class="main-content">
+            <div class="page-header">
+                <h2>CLIProxyAPI 管理台</h2>
+                <p class="subtitle">集中维护环境配置、连接检测、扫描/维护动作，以及远端运行记录和库存快照。</p>
+            </div>
+
+            <div class="cliproxy-stat-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="cliproxy-total-environments">0</div>
+                    <div class="stat-label">环境总数</div>
+                </div>
+                <div class="stat-card success">
+                    <div class="stat-value" id="cliproxy-enabled-environments">0</div>
+                    <div class="stat-label">启用环境</div>
+                </div>
+                <div class="stat-card warning">
+                    <div class="stat-value" id="cliproxy-run-count">0</div>
+                    <div class="stat-label">运行记录</div>
+                </div>
+                <div class="stat-card info">
+                    <div class="stat-value" id="cliproxy-inventory-count">0</div>
+                    <div class="stat-label">库存快照</div>
+                </div>
+            </div>
+
+            <div class="cliproxy-layout">
+                <aside class="cliproxy-stack">
+                    <section class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3 class="cliproxy-section-title">环境列表</h3>
+                                <p class="cliproxy-muted">选择一个环境查看运行和库存，或创建新的 CLIProxyAPI 目标。</p>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" id="cliproxy-refresh-environments-btn">刷新</button>
+                        </div>
+                        <div class="card-body">
+                            <div id="cliproxy-environment-list" class="cliproxy-environment-list">
+                                <div class="cliproxy-empty">正在加载环境列表...</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="card cliproxy-form-card">
+                        <div class="card-header">
+                            <div>
+                                <h3>环境创建 / 更新</h3>
+                                <p>同一表单支持新建环境与更新当前选中环境，保留测试、扫描和维护入口。</p>
+                            </div>
+                            <button class="btn btn-ghost btn-sm" id="cliproxy-new-environment-btn">新建环境</button>
+                        </div>
+                        <div class="card-body">
+                            <form id="cliproxy-environment-form">
+                                <input type="hidden" id="cliproxy-environment-id">
+                                <div class="cliproxy-form-grid">
+                                    <div class="form-group">
+                                        <label for="cliproxy-name">环境名称</label>
+                                        <input type="text" id="cliproxy-name" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="cliproxy-base-url">Base URL</label>
+                                        <input type="url" id="cliproxy-base-url" required placeholder="https://cliproxy.example.com">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="cliproxy-target-type">Target Type</label>
+                                        <input type="text" id="cliproxy-target-type" required placeholder="openai">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="cliproxy-provider">Provider</label>
+                                        <input type="text" id="cliproxy-provider" required placeholder="cliproxy">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="cliproxy-provider-scope">Provider Scope</label>
+                                        <input type="text" id="cliproxy-provider-scope" placeholder="team-a">
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="cliproxy-target-scope">Target Scope</label>
+                                        <input type="text" id="cliproxy-target-scope" placeholder="prod/openai">
+                                    </div>
+                                    <div class="form-group form-group-full">
+                                        <label for="cliproxy-token">Token</label>
+                                        <input type="password" id="cliproxy-token" placeholder="留空时更新操作不会替换现有 token">
+                                    </div>
+                                    <div class="form-group form-group-full">
+                                        <label for="cliproxy-scope-rules-json">Scope Rules JSON</label>
+                                        <textarea id="cliproxy-scope-rules-json" rows="4" placeholder='{"provider_ids":["main"]}'></textarea>
+                                    </div>
+                                    <div class="form-group form-group-full">
+                                        <label for="cliproxy-notes">备注</label>
+                                        <textarea id="cliproxy-notes" rows="3" placeholder="记录环境用途、维护窗口、特殊约束"></textarea>
+                                    </div>
+                                    <div class="form-group">
+                                        <label><input type="checkbox" id="cliproxy-enabled" checked> 启用环境</label>
+                                    </div>
+                                    <div class="form-group">
+                                        <label><input type="checkbox" id="cliproxy-is-default"> 设为默认环境</label>
+                                    </div>
+                                </div>
+                                <div class="form-actions" style="margin-top: 14px;">
+                                    <button type="submit" class="btn btn-primary" id="cliproxy-save-btn">保存环境</button>
+                                    <button type="button" class="btn btn-secondary" id="cliproxy-reset-form-btn">重置</button>
+                                </div>
+                            </form>
+                        </div>
+                    </section>
+                </aside>
+
+                <section class="cliproxy-stack">
+                    <section id="cliproxy-test-connection-section" class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3>连接测试</h3>
+                                <p id="cliproxy-selection-summary">请选择左侧环境以执行连接测试。</p>
+                            </div>
+                            <div class="cliproxy-action-row">
+                                <button class="btn btn-secondary" id="cliproxy-test-connection-btn" disabled>测试连接</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="cliproxy-meta-row">
+                                <span class="cliproxy-chip"><strong>默认</strong><span id="cliproxy-selected-default">-</span></span>
+                                <span class="cliproxy-chip"><strong>连接状态</strong><span id="cliproxy-selected-test-status">-</span></span>
+                            </div>
+                            <div id="cliproxy-connection-result" class="cliproxy-connection-result">连接检测结果会显示在这里。</div>
+                        </div>
+                    </section>
+
+                    <section id="cliproxy-maintenance-actions-section" class="card">
+                        <div class="card-header">
+                            <div>
+                                <h3>扫描与维护动作</h3>
+                                <p>针对当前选中环境触发 scan / maintain 任务，并查看最近维护时间。</p>
+                            </div>
+                            <div class="cliproxy-action-row">
+                                <button class="btn btn-info" id="cliproxy-scan-btn" disabled>启动扫描</button>
+                                <button class="btn btn-warning" id="cliproxy-maintain-btn" disabled>执行维护</button>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="cliproxy-meta-row">
+                                <span class="cliproxy-chip"><strong>最近扫描</strong><span id="cliproxy-selected-scanned-at">-</span></span>
+                                <span class="cliproxy-chip"><strong>最近维护</strong><span id="cliproxy-selected-maintained-at">-</span></span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="card cliproxy-table-card">
+                        <div class="card-header cliproxy-card-header">
+                            <div>
+                                <h3>运行历史</h3>
+                                <p>查看 scan / maintain 运行状态、阶段和结果概览。</p>
+                            </div>
+                            <div class="cliproxy-run-status">
+                                <span class="cliproxy-chip"><strong>当前环境</strong><span id="cliproxy-run-environment-name">未选择</span></span>
+                                <button class="btn btn-ghost btn-sm" id="cliproxy-refresh-runs-btn" disabled>刷新运行</button>
+                            </div>
+                        </div>
+                        <div class="cliproxy-table-scroll">
+                            <table class="cliproxy-table" id="cliproxy-run-history-table">
+                                <thead>
+                                    <tr>
+                                        <th>ID</th>
+                                        <th>类型</th>
+                                        <th>状态</th>
+                                        <th>阶段</th>
+                                        <th>记录数</th>
+                                        <th>创建时间</th>
+                                        <th>完成时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cliproxy-run-history-body">
+                                    <tr><td colspan="7" class="cliproxy-muted">请选择环境查看运行记录。</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section class="card cliproxy-table-card">
+                        <div class="card-header cliproxy-card-header">
+                            <div>
+                                <h3>远端库存</h3>
+                                <p>展示当前环境下的认证库存、同步状态和最近探测结果。</p>
+                            </div>
+                            <div class="cliproxy-inventory-meta">
+                                <span class="cliproxy-chip"><strong>库存条目</strong><span id="cliproxy-inventory-summary-count">0</span></span>
+                                <button class="btn btn-ghost btn-sm" id="cliproxy-refresh-inventory-btn" disabled>刷新库存</button>
+                            </div>
+                        </div>
+                        <div class="cliproxy-table-scroll">
+                            <table class="cliproxy-table" id="cliproxy-inventory-table">
+                                <thead>
+                                    <tr>
+                                        <th>Remote File ID</th>
+                                        <th>Email</th>
+                                        <th>Remote Account</th>
+                                        <th>同步状态</th>
+                                        <th>探测状态</th>
+                                        <th>最近发现</th>
+                                        <th>最近探测</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cliproxy-inventory-body">
+                                    <tr><td colspan="7" class="cliproxy-muted">请选择环境查看库存快照。</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </section>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/utils.js?v={{ static_version }}"></script>
+    <script src="/static/js/cliproxy.js?v={{ static_version }}"></script>
+</body>
+</html>

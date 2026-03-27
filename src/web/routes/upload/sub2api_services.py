@@ -2,13 +2,17 @@
 Sub2API 服务管理 API 路由
 """
 
-from typing import List, Optional
+from typing import List, Literal, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from ....database import crud
 from ....database.session import get_db
-from ....core.upload.sub2api_upload import test_sub2api_connection, batch_upload_to_sub2api
+from ....core.upload.sub2api_upload import (
+    batch_upload_to_sub2api,
+    normalize_sub2api_target_type,
+    test_sub2api_connection,
+)
 
 router = APIRouter()
 
@@ -19,6 +23,7 @@ class Sub2ApiServiceCreate(BaseModel):
     name: str
     api_url: str
     api_key: str
+    target_type: Literal["sub2api", "newApi"] = "sub2api"
     enabled: bool = True
     priority: int = 0
 
@@ -27,6 +32,7 @@ class Sub2ApiServiceUpdate(BaseModel):
     name: Optional[str] = None
     api_url: Optional[str] = None
     api_key: Optional[str] = None
+    target_type: Optional[Literal["sub2api", "newApi"]] = None
     enabled: Optional[bool] = None
     priority: Optional[int] = None
 
@@ -36,6 +42,7 @@ class Sub2ApiServiceResponse(BaseModel):
     name: str
     api_url: str
     has_key: bool
+    target_type: str
     enabled: bool
     priority: int
     created_at: Optional[str] = None
@@ -63,6 +70,7 @@ def _to_response(svc) -> Sub2ApiServiceResponse:
         name=svc.name,
         api_url=svc.api_url,
         has_key=bool(svc.api_key),
+        target_type=getattr(svc, "target_type", "sub2api"),
         enabled=svc.enabled,
         priority=svc.priority,
         created_at=svc.created_at.isoformat() if svc.created_at else None,
@@ -89,6 +97,7 @@ async def create_sub2api_service(request: Sub2ApiServiceCreate):
             name=request.name,
             api_url=request.api_url,
             api_key=request.api_key,
+            target_type=request.target_type,
             enabled=request.enabled,
             priority=request.priority,
         )
@@ -117,6 +126,7 @@ async def get_sub2api_service_full(service_id: int):
             "name": svc.name,
             "api_url": svc.api_url,
             "api_key": svc.api_key,
+            "target_type": getattr(svc, "target_type", "sub2api"),
             "enabled": svc.enabled,
             "priority": svc.priority,
         }
@@ -138,6 +148,8 @@ async def update_sub2api_service(service_id: int, request: Sub2ApiServiceUpdate)
         # api_key 留空则保持原值
         if request.api_key:
             update_data["api_key"] = request.api_key
+        if request.target_type is not None:
+            update_data["target_type"] = request.target_type
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:
@@ -196,6 +208,10 @@ async def upload_accounts_to_sub2api(request: Sub2ApiUploadRequest):
 
         api_url = svc.api_url
         api_key = svc.api_key
+        try:
+            target_type = normalize_sub2api_target_type(getattr(svc, "target_type", "sub2api"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     results = batch_upload_to_sub2api(
         request.account_ids,
@@ -203,5 +219,6 @@ async def upload_accounts_to_sub2api(request: Sub2ApiUploadRequest):
         api_key,
         concurrency=request.concurrency,
         priority=request.priority,
+        target_type=target_type,
     )
     return results

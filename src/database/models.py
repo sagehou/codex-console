@@ -5,13 +5,12 @@ SQLAlchemy ORM 模型定义
 from datetime import datetime
 from typing import Optional, Dict, Any
 import json
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 
 Base = declarative_base()
-
 
 class JSONEncodedDict(TypeDecorator):
     """JSON 编码字典类型"""
@@ -53,6 +52,8 @@ class Account(Base):
     cpa_uploaded = Column(Boolean, default=False)  # 是否已上传到 CPA
     cpa_uploaded_at = Column(DateTime)  # 上传时间
     source = Column(String(20), default='register')  # 'register' 或 'login'，区分账号来源
+    platform_source = Column(String(50))  # 账号来源平台，如 cloudmail
+    last_upload_target = Column(String(20))  # 最近成功上传目标，如 newApi
     subscription_type = Column(String(20))  # None / 'plus' / 'team'
     subscription_at = Column(DateTime)  # 订阅开通时间
     cookies = Column(Text)  # 完整 cookie 字符串，用于支付请求
@@ -77,6 +78,8 @@ class Account(Base):
             'cpa_uploaded': self.cpa_uploaded,
             'cpa_uploaded_at': self.cpa_uploaded_at.isoformat() if self.cpa_uploaded_at else None,
             'source': self.source,
+            'platform_source': self.platform_source,
+            'last_upload_target': self.last_upload_target,
             'subscription_type': self.subscription_type,
             'subscription_at': self.subscription_at.isoformat() if self.subscription_at else None,
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -152,6 +155,7 @@ class Sub2ApiService(Base):
     name = Column(String(100), nullable=False)  # 服务名称
     api_url = Column(String(500), nullable=False)  # API URL (host)
     api_key = Column(Text, nullable=False)  # x-api-key
+    target_type = Column(String(20), nullable=False, default='sub2api')  # 'sub2api' or 'newApi'
     enabled = Column(Boolean, default=True)
     priority = Column(Integer, default=0)  # 优先级
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -227,3 +231,190 @@ class Proxy(Base):
             auth = f"{self.username}:{self.password}@"
 
         return f"{scheme}://{auth}{self.host}:{self.port}"
+
+
+class CLIProxyAPIEnvironment(Base):
+    """CLIProxyAPI 远端环境配置表"""
+    __tablename__ = 'cliproxy_environments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(100), nullable=False, unique=True, index=True)
+    base_url = Column(String(500), nullable=False)
+    _token_encrypted = Column("token_encrypted", Text)
+    target_type = Column(String(50), nullable=False)
+    provider = Column(String(50), nullable=False)
+    provider_scope = Column(String(100))
+    target_scope = Column(String(100))
+    scope_rules_json = Column(JSONEncodedDict)
+    enabled = Column(Boolean, default=True)
+    is_default = Column(Boolean, default=False)
+    notes = Column(Text)
+    last_test_status = Column(String(20), default='unknown')
+    last_test_latency_ms = Column(Integer)
+    last_test_error = Column(Text)
+    last_scanned_at = Column(DateTime)
+    last_maintained_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    @property
+    def has_token(self) -> bool:
+        return bool(self._token_encrypted)
+
+    @property
+    def token_encrypted(self) -> str:
+        return self._token_encrypted or ""
+
+    @token_encrypted.setter
+    def token_encrypted(self, value: Optional[str]) -> None:
+        from ..core.cliproxy.secrets import encrypt_cliproxy_token
+
+        if not value:
+            self._token_encrypted = ""
+            return
+
+        self._token_encrypted = encrypt_cliproxy_token(value)
+
+    def set_encrypted_token(self, token_encrypted: Optional[str]) -> None:
+        from ..core.cliproxy.secrets import decrypt_cliproxy_token
+
+        if not token_encrypted:
+            self._token_encrypted = ""
+            return
+
+        decrypt_cliproxy_token(token_encrypted)
+        self._token_encrypted = token_encrypted
+
+    def to_summary_dict(self) -> Dict[str, Any]:
+        return {
+            'id': self.id,
+            'name': self.name,
+            'base_url': self.base_url,
+            'target_type': self.target_type,
+            'provider': self.provider,
+            'provider_scope': self.provider_scope,
+            'target_scope': self.target_scope,
+            'enabled': self.enabled,
+            'is_default': self.is_default or False,
+            'has_token': self.has_token,
+            'last_test_status': self.last_test_status,
+            'last_test_latency_ms': self.last_test_latency_ms,
+            'last_test_error': self.last_test_error,
+            'last_scanned_at': self.last_scanned_at.isoformat() if self.last_scanned_at else None,
+            'last_maintained_at': self.last_maintained_at.isoformat() if self.last_maintained_at else None,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'updated_at': self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    @staticmethod
+    def maintenance_contract_v1() -> Dict[str, Any]:
+        return {
+            'refill': {
+                'state': 'reserved',
+                'enabled': False,
+                'version': 'v1',
+            }
+        }
+
+    def to_detail_dict(self) -> Dict[str, Any]:
+        from ..core.cliproxy.secrets import mask_cliproxy_token
+
+        payload = self.to_summary_dict()
+        payload['scope_rules_json'] = self.scope_rules_json
+        payload['notes'] = self.notes
+        payload['maintenance_contract'] = self.maintenance_contract_v1()
+        payload['token_masked'] = mask_cliproxy_token(self.token_encrypted) if self.token_encrypted else ''
+        return payload
+
+    def set_token(self, token: str) -> None:
+        from ..core.cliproxy.secrets import encrypt_cliproxy_token
+
+        if not token:
+            self._token_encrypted = ""
+            return
+
+        self.token_encrypted = token
+
+    def get_token(self) -> str:
+        from ..core.cliproxy.secrets import decrypt_cliproxy_token
+
+        return decrypt_cliproxy_token(self.token_encrypted)
+
+
+class RemoteAuthInventory(Base):
+    """远端认证库存快照表"""
+    __tablename__ = 'remote_auth_inventory'
+    __table_args__ = (
+        UniqueConstraint('environment_id', 'remote_file_id', name='uq_remote_auth_inventory_env_file'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    environment_id = Column(Integer, ForeignKey('cliproxy_environments.id'), nullable=False, index=True)
+    remote_file_id = Column(String(255), nullable=False)
+    email = Column(String(255))
+    remote_account_id = Column(String(255))
+    local_account_id = Column(Integer, ForeignKey('accounts.id'), index=True)
+    payload_json = Column(JSONEncodedDict)
+    last_seen_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_probed_at = Column(DateTime)
+    sync_state = Column(String(50), default='unlinked')
+    probe_status = Column(String(50), default='unknown')
+    disable_source = Column(String(50))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    environment = relationship('CLIProxyAPIEnvironment')
+    account = relationship('Account')
+
+
+class MaintenanceRun(Base):
+    """维护运行记录表"""
+    __tablename__ = 'maintenance_runs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    environment_id = Column(Integer, ForeignKey('cliproxy_environments.id'), index=True)
+    run_type = Column(String(32), nullable=False)
+    status = Column(String(20), nullable=False, default='pending')
+    started_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime)
+    summary_json = Column(JSONEncodedDict)
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    environment = relationship('CLIProxyAPIEnvironment')
+
+
+class MaintenanceActionLog(Base):
+    """维护动作审计明细表"""
+    __tablename__ = 'maintenance_action_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(Integer, ForeignKey('maintenance_runs.id'), nullable=False, index=True)
+    environment_id = Column(Integer, ForeignKey('cliproxy_environments.id'), index=True)
+    action_type = Column(String(50), nullable=False)
+    status = Column(String(20), nullable=False, default='pending')
+    remote_file_id = Column(String(255))
+    message = Column(Text)
+    details_json = Column(JSONEncodedDict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    run = relationship('MaintenanceRun')
+    environment = relationship('CLIProxyAPIEnvironment')
+
+
+class AuditLog(Base):
+    """审计日志表"""
+    __tablename__ = 'audit_logs'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    environment_id = Column(Integer, ForeignKey('cliproxy_environments.id'), index=True)
+    run_id = Column(Integer, ForeignKey('maintenance_runs.id'), index=True)
+    event_type = Column(String(50), nullable=False)
+    actor = Column(String(100), nullable=False, default='system')
+    message = Column(Text)
+    details_json = Column(JSONEncodedDict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    environment = relationship('CLIProxyAPIEnvironment')
+    run = relationship('MaintenanceRun')

@@ -16,7 +16,10 @@ logger = logging.getLogger(__name__)
 
 class EmailServiceError(Exception):
     """邮箱服务异常"""
-    pass
+
+    def __init__(self, message: str, status_code: int = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class EmailServiceStatus(Enum):

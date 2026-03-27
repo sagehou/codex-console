@@ -8,9 +8,11 @@ import re
 import time
 import json
 import logging
+from datetime import datetime, timezone
 from email import message_from_string
 from email.header import decode_header, make_header
 from email.message import Message
+from email.utils import parsedate_to_datetime
 from email.policy import default as email_policy
 from html import unescape
 from typing import Optional, Dict, Any, List
@@ -22,6 +24,9 @@ from ..config.constants import OTP_CODE_PATTERN, OTP_CODE_SEMANTIC_PATTERN
 
 
 logger = logging.getLogger(__name__)
+
+UNKNOWN_TIME_ACCEPTANCE_DELAY_SECONDS = 6
+MILLISECOND_EPOCH_THRESHOLD = 10_000_000_000
 
 TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS = [
     re.compile(OTP_CODE_SEMANTIC_PATTERN, re.IGNORECASE),
@@ -76,6 +81,7 @@ class TempMailService(BaseEmailService):
         # 邮箱缓存：email -> {jwt, address, password}
         self._email_cache: Dict[str, Dict[str, Any]] = {}
         self._used_codes: Dict[str, set] = {}
+        self._used_mail_ids: Dict[str, set] = {}
 
     def _decode_mime_header(self, value: str) -> str:
         """解码 MIME 头，兼容 RFC 2047 编码主题。"""
@@ -147,6 +153,7 @@ class TempMailService(BaseEmailService):
             or ""
         ).strip()
         raw = str(mail.get("raw") or "").strip()
+        timestamp = self._extract_mail_timestamp(mail)
 
         if raw:
             try:
@@ -154,6 +161,9 @@ class TempMailService(BaseEmailService):
                 sender = sender or self._decode_mime_header(message.get("From", ""))
                 subject = subject or self._decode_mime_header(message.get("Subject", ""))
                 parsed_body = self._extract_body_from_message(message)
+                mime_timestamp = self._parse_email_datetime(message.get("Date"))
+                if timestamp is None:
+                    timestamp = mime_timestamp
                 if parsed_body:
                     body_text = f"{body_text}\n{parsed_body}".strip() if body_text else parsed_body
             except Exception as e:
@@ -166,24 +176,82 @@ class TempMailService(BaseEmailService):
             "subject": subject,
             "body": body_text,
             "raw": raw,
+            "timestamp": timestamp,
         }
 
-    def _extract_otp(self, subject: str, body: str, raw: str, pattern: str) -> Optional[str]:
-        """优先提取语义验证码，失败后回退到通用 6 位数字匹配。"""
+    def _extract_mail_timestamp(self, mail: Dict[str, Any]) -> Optional[float]:
+        """提取列表级时间戳。"""
+        for key in (
+            "createdAt",
+            "created_at",
+            "date",
+            "receivedAt",
+            "received_at",
+            "timestamp",
+            "time",
+        ):
+            parsed = self._parse_timestamp_value(mail.get(key))
+            if parsed is not None:
+                return parsed
+        return None
+
+    def _parse_timestamp_value(self, value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, (int, float)):
+            numeric_value = float(value)
+            return numeric_value / 1000 if numeric_value >= MILLISECOND_EPOCH_THRESHOLD else numeric_value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                numeric_value = float(text)
+                return numeric_value / 1000 if numeric_value >= MILLISECOND_EPOCH_THRESHOLD else numeric_value
+            except ValueError:
+                return self._parse_iso_datetime(text) or self._parse_email_datetime(text)
+        return None
+
+    def _parse_iso_datetime(self, value: str) -> Optional[float]:
+        try:
+            normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return None
+
+    def _parse_email_datetime(self, value: Optional[str]) -> Optional[float]:
+        if not value:
+            return None
+        try:
+            parsed = parsedate_to_datetime(value)
+            if parsed is None:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+        except Exception:
+            return None
+
+    def _extract_otp_candidate(self, subject: str, body: str, raw: str, pattern: str) -> Dict[str, Any]:
+        """提取验证码候选，并标记是否命中强语义规则。"""
         for text in (body, raw, subject):
             if not text:
                 continue
             for contextual_pattern in TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS:
                 match = contextual_pattern.search(text)
                 if match:
-                    return match.group(1)
+                    return {"code": match.group(1), "semantic_match": True}
 
         fallback_parts = [part for part in (subject, body) if part]
         combined = "\n".join(fallback_parts)
         match = re.search(pattern, combined)
         if match:
-            return match.group(1)
-        return None
+            return {"code": match.group(1), "semantic_match": False}
+        return {"code": None, "semantic_match": False}
+
+    def _extract_otp(self, subject: str, body: str, raw: str, pattern: str) -> Optional[str]:
+        """优先提取语义验证码，失败后回退到通用 6 位数字匹配。"""
+        return self._extract_otp_candidate(subject, body, raw, pattern)["code"]
 
     def _default_headers(self) -> Dict[str, str]:
         """构造基础请求头"""
@@ -265,8 +333,9 @@ class TempMailService(BaseEmailService):
                     error_msg = f"{error_msg} - {error_data}"
                 except Exception:
                     error_msg = f"{error_msg} - {response.text[:200]}"
-                self.update_status(False, EmailServiceError(error_msg))
-                raise EmailServiceError(error_msg)
+                error = EmailServiceError(error_msg, status_code=response.status_code)
+                self.update_status(False, error)
+                raise error
 
             try:
                 return response.json()
@@ -371,7 +440,10 @@ class TempMailService(BaseEmailService):
         seen_mail_ids: set = set()
         if email not in self._used_codes:
             self._used_codes[email] = set()
+        if email not in self._used_mail_ids:
+            self._used_mail_ids[email] = set()
         used_codes = self._used_codes[email]
+        used_mail_ids = self._used_mail_ids[email]
 
         # 优先使用地址级 JWT，401 时使用地址密码重新登录
         cached = self._email_cache.get(email, {})
@@ -395,7 +467,7 @@ class TempMailService(BaseEmailService):
                             headers=self._address_headers(jwt),
                         )
                     except EmailServiceError as e:
-                        if "401" in str(e) and password:
+                        if e.status_code == 401 and password:
                             jwt = self._login_address(email, password)
                             response = self._make_request(
                                 "GET",
@@ -418,10 +490,8 @@ class TempMailService(BaseEmailService):
 
                 for mail in mails:
                     mail_id = mail.get("id")
-                    if not mail_id or mail_id in seen_mail_ids:
+                    if not mail_id or mail_id in seen_mail_ids or mail_id in used_mail_ids:
                         continue
-
-                    seen_mail_ids.add(mail_id)
 
                     parsed = self._extract_mail_fields(mail)
                     sender = parsed["sender"].lower()
@@ -434,15 +504,41 @@ class TempMailService(BaseEmailService):
                     if "openai" not in sender and "openai" not in content.lower():
                         continue
 
-                    code = self._extract_otp(subject, body_text, raw_text, pattern)
+                    otp_candidate = self._extract_otp_candidate(subject, body_text, raw_text, pattern)
+                    code = otp_candidate["code"]
                     if code:
-                        if code in used_codes:
-                            logger.debug(f"跳过 TempMail 邮箱 {email} 已使用的验证码: {code}")
+                        timestamp = parsed.get("timestamp")
+                        if otp_sent_at is not None and timestamp is not None and timestamp < otp_sent_at:
+                            seen_mail_ids.add(mail_id)
+                            logger.debug(f"跳过 TempMail 邮箱 {email} 中早于 otp_sent_at 的邮件: {mail_id}")
                             continue
+                        if otp_sent_at is not None and timestamp is None:
+                            waited_seconds = time.time() - otp_sent_at
+                            if (
+                                waited_seconds < UNKNOWN_TIME_ACCEPTANCE_DELAY_SECONDS
+                                or not otp_candidate["semantic_match"]
+                            ):
+                                logger.debug(
+                                    "跳过 TempMail 邮箱 %s 未知时间邮件: mail_id=%s waited=%s semantic=%s",
+                                    email,
+                                    mail_id,
+                                    round(waited_seconds, 2),
+                                    otp_candidate["semantic_match"],
+                                )
+                                continue
+                        if code in used_codes:
+                            seen_mail_ids.add(mail_id)
+                            logger.debug(f"跳过 TempMail 邮箱 {email} 已使用的验证码: {code}")
+                            used_mail_ids.add(mail_id)
+                            continue
+                        seen_mail_ids.add(mail_id)
                         used_codes.add(code)
+                        used_mail_ids.add(mail_id)
                         logger.info(f"从 TempMail 邮箱 {email} 找到验证码: {code}")
                         self.update_status(True)
                         return code
+
+                    seen_mail_ids.add(mail_id)
 
             except Exception as e:
                 logger.debug(f"检查 TempMail 邮件时出错: {e}")
@@ -492,6 +588,8 @@ class TempMailService(BaseEmailService):
 
         for address in emails_to_delete:
             self._email_cache.pop(address, None)
+            self._used_codes.pop(address, None)
+            self._used_mail_ids.pop(address, None)
             removed = True
 
         if removed:

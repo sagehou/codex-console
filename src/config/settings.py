@@ -11,6 +11,9 @@ from pydantic.types import SecretStr
 from dataclasses import dataclass
 
 
+CLIPROXY_ENCRYPTION_KEY_PLACEHOLDER = "your-encryption-key-change-in-production"
+
+
 class SettingCategory(str, Enum):
     """设置分类"""
     GENERAL = "general"
@@ -289,15 +292,6 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         default_value="",
         category=SettingCategory.CUSTOM_DOMAIN,
         description="自定义域名 API 密钥",
-        is_secret=True
-    ),
-
-    # 安全配置
-    "encryption_key": SettingDefinition(
-        db_key="security.encryption_key",
-        default_value="your-encryption-key-change-in-production",
-        category=SettingCategory.SECURITY,
-        description="加密密钥",
         is_secret=True
     ),
 
@@ -676,9 +670,6 @@ class Settings(BaseModel):
     custom_domain_base_url: str = ""
     custom_domain_api_key: Optional[SecretStr] = None
 
-    # 安全配置
-    encryption_key: SecretStr = SecretStr("your-encryption-key-change-in-production")
-
     # Team Manager 配置
     tm_enabled: bool = False
     tm_api_url: str = ""
@@ -736,6 +727,10 @@ def update_settings(**kwargs) -> Settings:
     _save_settings_to_db(**kwargs)
 
     return _settings
+
+
+def get_cliproxy_encryption_key() -> str:
+    return os.environ.get("CLIPROXY_ENCRYPTION_KEY", CLIPROXY_ENCRYPTION_KEY_PLACEHOLDER)
 
 
 def get_database_url() -> str:

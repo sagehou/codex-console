@@ -7,6 +7,252 @@
     <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📋</text></svg>">
     <style>
+        .accounts-workbench {
+            display: grid;
+            grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.95fr);
+            gap: 20px;
+            align-items: start;
+        }
+        .workbench-column {
+            min-width: 0;
+        }
+        .workbench-toolbar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .workbench-filters,
+        .workbench-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+        }
+        .accounts-list-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .accounts-list-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 16px 18px;
+            border-bottom: 1px solid var(--border);
+        }
+        .accounts-list-header-main {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            min-width: 0;
+        }
+        .accounts-list-meta {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            min-width: 0;
+        }
+        .accounts-list-meta h3 {
+            margin: 0;
+            font-size: 1rem;
+        }
+        .accounts-list-meta p {
+            margin: 0;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        .accounts-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding: 16px;
+        }
+        .account-row-card {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1.4fr) minmax(200px, 1fr) auto;
+            gap: 14px;
+            align-items: start;
+            padding: 16px;
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: linear-gradient(180deg, var(--surface) 0%, color-mix(in srgb, var(--surface) 88%, var(--background) 12%) 100%);
+            box-shadow: 0 10px 28px rgba(15, 23, 42, 0.06);
+        }
+        .account-row-card.is-active {
+            border-color: var(--primary);
+            box-shadow: 0 14px 32px rgba(37, 99, 235, 0.18);
+        }
+        .account-select-cell {
+            padding-top: 4px;
+        }
+        .account-primary {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .account-title-row,
+        .account-summary-grid,
+        .account-status-row,
+        .detail-topline,
+        .detail-chip-row,
+        .detail-action-grid,
+        .trace-grid,
+        .cliproxy-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .account-title-row {
+            align-items: center;
+        }
+        .account-email-button {
+            border: none;
+            background: none;
+            padding: 0;
+            margin: 0;
+            font: inherit;
+            color: var(--text-primary);
+            font-weight: 600;
+            cursor: pointer;
+            text-align: left;
+        }
+        .account-email-button:hover {
+            color: var(--primary);
+        }
+        .summary-pill,
+        .detail-chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 10px;
+            border-radius: 999px;
+            background: var(--surface-hover);
+            color: var(--text-secondary);
+            font-size: 0.78rem;
+            line-height: 1.2;
+        }
+        .summary-pill strong,
+        .detail-chip strong {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+        .account-supporting {
+            min-width: 0;
+            display: grid;
+            gap: 10px;
+        }
+        .micro-panel,
+        .detail-layer-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: var(--surface);
+            padding: 12px 14px;
+        }
+        .micro-panel h4,
+        .detail-layer-card h4 {
+            margin: 0 0 6px;
+            font-size: 0.84rem;
+        }
+        .micro-panel p,
+        .detail-layer-card p {
+            margin: 0;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            line-height: 1.5;
+        }
+        .account-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            align-items: stretch;
+        }
+        .floating-bulk-bar {
+            position: sticky;
+            bottom: 20px;
+            z-index: 20;
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 14px 16px;
+            margin-top: 16px;
+            border: 1px solid color-mix(in srgb, var(--primary) 26%, var(--border) 74%);
+            border-radius: 18px;
+            background: color-mix(in srgb, var(--surface) 90%, var(--primary-light, #dbeafe) 10%);
+            box-shadow: 0 18px 36px rgba(15, 23, 42, 0.16);
+        }
+        .floating-bulk-bar.is-visible {
+            display: flex;
+        }
+        .bulk-bar-summary {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+        .bulk-bar-summary strong {
+            font-size: 0.95rem;
+        }
+        .bulk-bar-summary span {
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+        .bulk-bar-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        .detail-panel {
+            position: sticky;
+            top: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .detail-panel-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 18px;
+            border: 1px solid var(--border);
+            border-radius: 18px;
+            background: linear-gradient(160deg, color-mix(in srgb, var(--primary-light, #dbeafe) 58%, var(--surface) 42%) 0%, var(--surface) 100%);
+        }
+        .detail-panel-header h3 {
+            margin: 0;
+            font-size: 1.1rem;
+        }
+        .detail-panel-header p {
+            margin: 4px 0 0;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        .detail-layer-card pre {
+            margin: 0;
+            padding: 10px 12px;
+            background: var(--surface-hover);
+            border-radius: 12px;
+            color: var(--text-secondary);
+            font-size: 0.74rem;
+            overflow-x: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+        .detail-empty {
+            padding: 22px 18px;
+            border: 1px dashed var(--border);
+            border-radius: 18px;
+            background: var(--surface);
+            color: var(--text-secondary);
+            font-size: 0.88rem;
+            line-height: 1.6;
+        }
         .password-cell {
             font-family: var(--font-mono);
             font-size: 0.75rem;
@@ -44,6 +290,30 @@
         }
         .cpa-status .badge.uploaded { background: var(--success-color); color: white; }
         .cpa-status .badge.pending { background: var(--border-color); color: var(--text-secondary); }
+        @media (max-width: 1100px) {
+            .accounts-workbench {
+                grid-template-columns: 1fr;
+            }
+            .detail-panel {
+                position: static;
+            }
+        }
+        @media (max-width: 860px) {
+            .account-row-card {
+                grid-template-columns: auto 1fr;
+            }
+            .account-actions,
+            .account-supporting {
+                grid-column: 1 / -1;
+            }
+            .floating-bulk-bar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+            .bulk-bar-actions {
+                justify-content: flex-start;
+            }
+        }
     </style>
 </head>
 <body>
@@ -56,6 +326,7 @@
             <div class="nav-links">
                 <a href="/" class="nav-link">注册</a>
                 <a href="/accounts" class="nav-link active">账号管理</a>
+                <a href="/cliproxy" class="nav-link">CLIProxyAPI</a>
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/settings" class="nav-link">设置</a>
@@ -93,10 +364,10 @@
                 </div>
             </div>
 
-            <!-- 工具栏 -->
-            <div class="card toolbar-card">
-                <div class="card-body toolbar">
-                    <div class="toolbar-left">
+            <div id="accounts-workbench" class="accounts-workbench">
+                <section id="accounts-list-panel" class="workbench-column">
+                    <div class="workbench-toolbar">
+                        <div class="workbench-filters">
                         <select id="filter-status" class="form-select">
                             <option value="">全部状态</option>
                             <option value="active">活跃</option>
@@ -113,33 +384,11 @@
                         </select>
 
                         <input type="text" id="search-input" class="form-input" placeholder="🔍 搜索邮箱..." style="min-width: 200px;">
-                    </div>
+                        </div>
 
-                    <div class="toolbar-right">
+                        <div class="workbench-actions">
                         <button class="btn btn-ghost" id="refresh-btn" title="刷新">
                             🔄 刷新
-                        </button>
-                        <button class="btn btn-warning" id="batch-refresh-btn" disabled title="批量刷新Token">
-                            🔄 刷新Token
-                        </button>
-                        <button class="btn btn-info" id="batch-validate-btn" disabled title="批量验证Token">
-                            ✅ 验证Token
-                        </button>
-                        <button class="btn btn-info" id="batch-check-sub-btn" disabled title="批量检测订阅状态">
-                            🔍 检测订阅
-                        </button>
-                        <div class="dropdown">
-                            <button class="btn btn-success" id="batch-upload-btn" disabled>
-                                ☁️ 上传
-                            </button>
-                            <div class="dropdown-menu" id="upload-menu">
-                                <a href="#" class="dropdown-item" id="batch-upload-cpa-item">☁️ 上传到 CPA</a>
-                                <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">🔗 上传到 Sub2API</a>
-                                <a href="#" class="dropdown-item" id="batch-upload-tm-item">🚀 上传到 Team Manager</a>
-                            </div>
-                        </div>
-                        <button class="btn btn-danger" id="batch-delete-btn" disabled>
-                            🗑️ 批量删除
                         </button>
                         <div class="dropdown">
                             <button class="btn btn-primary" id="export-btn">
@@ -154,39 +403,24 @@
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <!-- 账号列表 -->
-            <div class="card">
-                <div class="card-body" style="padding: 0;">
-                    <div class="table-container">
-                        <table class="data-table">
-                            <thead>
-                                <tr>
-                                    <th style="width: 40px;"><input type="checkbox" id="select-all"></th>
-                                    <th style="width: 60px;">ID</th>
-                                    <th>邮箱</th>
-                                    <th style="width: 100px;">密码</th>
-                                    <th style="width: 120px;">邮箱服务</th>
-                                    <th style="width: 80px;">状态</th>
-                                    <th style="width: 80px;">CPA</th>
-                                    <th style="width: 80px;">订阅</th>
-                                    <th style="width: 140px;">最后刷新</th>
-                                    <th style="width: 160px;">操作</th>
-                                </tr>
-                            </thead>
-                            <tbody id="accounts-table">
-                                <tr>
-                                    <td colspan="11">
-                                        <div class="empty-state">
-                                            <div class="skeleton skeleton-text" style="width: 60%;"></div>
-                                            <div class="skeleton skeleton-text" style="width: 80%;"></div>
-                                            <div class="skeleton skeleton-text" style="width: 40%;"></div>
-                                        </div>
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
+                <div class="card accounts-list-shell">
+                    <div class="accounts-list-header">
+                        <div class="accounts-list-header-main">
+                            <input type="checkbox" id="select-all" aria-label="全选当前页">
+                            <div class="accounts-list-meta">
+                                <h3>账号工作台主列表</h3>
+                                <p>展示平台来源、订阅/额度、风险状态、最近活动和远程维护摘要。</p>
+                            </div>
+                        </div>
+                        <div class="summary-pill"><strong id="list-page-summary">第 1 页</strong><span>保持当前批量流程可用</span></div>
+                    </div>
+                    <div id="accounts-selection-banner-anchor"></div>
+                    <div id="accounts-table" class="accounts-list">
+                        <div class="empty-state">
+                            <div class="skeleton skeleton-text" style="width: 60%;"></div>
+                            <div class="skeleton skeleton-text" style="width: 80%;"></div>
+                            <div class="skeleton skeleton-text" style="width: 40%;"></div>
+                        </div>
                     </div>
 
                     <!-- 分页 -->
@@ -200,21 +434,62 @@
                         </button>
                     </div>
                 </div>
+                <div id="accounts-bulk-bar" class="floating-bulk-bar" aria-live="polite">
+                    <div class="bulk-bar-summary">
+                        <strong id="bulk-selection-count">未选择账号</strong>
+                        <span id="bulk-selection-context">选择账号后可执行批量刷新、验证、订阅检查、上传、导出和删除。</span>
+                    </div>
+                    <div class="bulk-bar-actions">
+                        <button class="btn btn-warning" id="batch-refresh-btn" disabled title="批量刷新Token">🔄 刷新Token</button>
+                        <button class="btn btn-info" id="batch-validate-btn" disabled title="批量验证Token">✅ 验证Token</button>
+                        <button class="btn btn-info" id="batch-check-sub-btn" disabled title="批量检测订阅状态">🔍 检测订阅</button>
+                        <div class="dropdown">
+                            <button class="btn btn-success" id="batch-upload-btn" disabled>☁️ 上传</button>
+                            <div class="dropdown-menu" id="upload-menu">
+                                <a href="#" class="dropdown-item" id="batch-upload-cpa-item">☁️ 上传到 CPA</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">🔗 上传到 Sub2API</a>
+                                <a href="#" class="dropdown-item" id="batch-upload-tm-item">🚀 上传到 Team Manager</a>
+                            </div>
+                        </div>
+                        <button class="btn btn-danger" id="batch-delete-btn" disabled>🗑️ 批量删除</button>
+                    </div>
+                </div>
+                </section>
+
+                <aside id="account-detail-panel" class="workbench-column detail-panel">
+                    <div class="detail-panel-header">
+                        <div>
+                            <div class="detail-topline">
+                                <span class="summary-pill"><strong>账号侧工作台</strong><span>右侧详情</span></span>
+                            </div>
+                            <h3 id="detail-identity-title">选择一个账号</h3>
+                            <p id="detail-identity-subtitle">从左侧主列表选择账号，查看订阅、额度、远程维护和 CLIProxy 摘要。</p>
+                        </div>
+                        <button class="btn btn-ghost btn-sm" id="close-modal">清空</button>
+                    </div>
+
+                    <section class="detail-layer-card" data-detail-layer="subscription-quota">
+                        <h4>订阅与额度优先层</h4>
+                        <div id="detail-subscription-quota" class="detail-empty">在这里查看订阅类型、额度限制、风险/待处理状态以及最近活动概览。</div>
+                    </section>
+
+                    <section class="detail-layer-card" data-detail-layer="core-ops">
+                        <h4>核心操作与快捷动作</h4>
+                        <div id="detail-core-ops" class="detail-empty">账号身份头部、核心运维卡片和常用快捷操作会在这里展开。</div>
+                    </section>
+
+                    <section class="detail-layer-card" data-detail-layer="automation-trace">
+                        <h4>自动化轨迹</h4>
+                        <div id="detail-automation-trace" class="detail-empty">显示 source、batch、proxy、recent tasks 和日志摘录。</div>
+                    </section>
+
+                    <section class="detail-layer-card" data-detail-layer="cliproxy-summary">
+                        <h4>CLIProxy 摘要与跳转</h4>
+                        <div id="detail-cliproxy-summary" class="detail-empty">显示账号侧 CLIProxy 关联环境、远程文件、同步状态，以及进入维护视图的入口。</div>
+                    </section>
+                </aside>
             </div>
         </main>
-    </div>
-
-    <!-- 详情模态框 -->
-    <div class="modal" id="detail-modal">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h3>📋 账号详情</h3>
-                <button class="modal-close" id="close-modal">&times;</button>
-            </div>
-            <div class="modal-body" id="modal-body">
-                <!-- 动态加载 -->
-            </div>
-        </div>
     </div>
 
     <!-- CPA 服务选择模态框 -->
