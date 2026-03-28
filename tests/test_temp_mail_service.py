@@ -61,7 +61,7 @@ def test_create_email_uses_random_choice_from_normalized_domains(monkeypatch):
         "domain": "a.com, b.com",
     })
     fake_client = FakeHTTPClient([
-        FakeResponse(payload={"address": "tester@b.com", "jwt": "jwt-123", "password": "plain-password"}),
+        FakeResponse(payload={"address": "tester@b.com", "jwt": "jwt-123", "password": "plain-password", "address_id": "addr-1"}),
     ])
     service.http_client = fake_client
 
@@ -85,7 +85,7 @@ def test_init_rejects_empty_domain_list_after_normalization():
         })
 
 
-def test_get_verification_code_uses_api_mails_with_limit_and_offset_only():
+def test_get_verification_code_refreshes_jwt_via_address_login_before_api_mails():
     service = TempMailService({
         "base_url": "https://mail.example.com",
         "admin_password": "admin-secret",
@@ -93,6 +93,7 @@ def test_get_verification_code_uses_api_mails_with_limit_and_offset_only():
         "site_password": "site-secret",
     })
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "tester@example.com"}),
         FakeResponse(
             payload={
                 "results": [
@@ -110,16 +111,27 @@ def test_get_verification_code_uses_api_mails_with_limit_and_offset_only():
     service.http_client = fake_client
 
     email = "tester@example.com"
-    service._email_cache[email] = {"email": email, "jwt": "jwt-abc", "password": "plain-password"}
+    service._email_cache[email] = {
+        "email": email,
+        "address_id": "addr-1",
+        "jwt": "jwt-abc",
+        "password": "plain-password",
+    }
 
     code = service.get_verification_code(email=email, timeout=1)
 
     assert code == "654321"
-    assert len(fake_client.calls) == 1
-    mail_call = fake_client.calls[0]
+    assert len(fake_client.calls) == 2
+    login_call = fake_client.calls[0]
+    assert login_call["url"] == "https://mail.example.com/api/address_login"
+    assert login_call["kwargs"]["json"] == {
+        "email": "tester@example.com",
+        "password": "plain-password",
+    }
+    mail_call = fake_client.calls[1]
     assert mail_call["url"] == "https://mail.example.com/api/mails"
     assert mail_call["kwargs"]["params"] == {"limit": 20, "offset": 0}
-    assert mail_call["kwargs"]["headers"]["Authorization"] == "Bearer jwt-abc"
+    assert mail_call["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
 
 
 def test_get_verification_code_without_cached_jwt_logs_in_with_password():
@@ -171,6 +183,7 @@ def test_get_verification_code_skips_last_used_mail_id_between_calls():
         "domain": "example.com",
     })
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "jwt-fresh-1", "address": "reuse@example.com"}),
         FakeResponse(
             payload={
                 "results": [
@@ -184,6 +197,7 @@ def test_get_verification_code_skips_last_used_mail_id_between_calls():
                 "total": 1,
             }
         ),
+        FakeResponse(payload={"jwt": "jwt-fresh-2", "address": "reuse@example.com"}),
         FakeResponse(
             payload={
                 "results": [
@@ -226,6 +240,7 @@ def test_get_verification_code_filters_old_mails_by_otp_sent_at():
     })
     otp_sent_at = 1_700_000_000.0
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "filter@example.com"}),
         FakeResponse(
             payload={
                 "results": [
@@ -271,6 +286,7 @@ def test_get_verification_code_accepts_mails_key_and_missing_mail_id():
         "domain": "example.com",
     })
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "format@example.com"}),
         FakeResponse(
             payload={
                 "mails": [
@@ -305,6 +321,7 @@ def test_get_verification_code_scans_all_results_and_prefers_raw():
         "domain": "example.com",
     })
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "detail@example.com"}),
         FakeResponse(
             payload={
                 "results": [
@@ -341,7 +358,9 @@ def test_get_verification_code_scans_all_results_and_prefers_raw():
     code = service.get_verification_code(email="detail@example.com", timeout=1)
 
     assert code == "123456"
-    assert len(fake_client.calls) == 1
+    assert len(fake_client.calls) == 2
+    assert fake_client.calls[0]["url"] == "https://mail.example.com/api/address_login"
+    assert fake_client.calls[1]["url"] == "https://mail.example.com/api/mails"
 
 
 def test_get_verification_code_raises_site_password_config_error_on_401_with_custom_auth():
@@ -352,7 +371,7 @@ def test_get_verification_code_raises_site_password_config_error_on_401_with_cus
         "site_password": "wrong-site-password",
     })
     fake_client = FakeHTTPClient([
-        FakeResponse(status_code=401, payload={"error": "unauthorized"}),
+        FakeResponse(status_code=401, payload={"error": "x-custom-auth rejected"}),
     ])
     service.http_client = fake_client
     service._email_cache["target@example.com"] = {
@@ -422,6 +441,22 @@ def test_create_email_fails_when_password_missing_from_response():
         service.create_email()
 
 
+def test_create_email_fails_when_address_id_missing_from_response():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "site_password": "site-secret",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(payload={"address": "tester@example.com", "jwt": "address-jwt", "password": "plain-password"}),
+    ])
+    service.http_client = fake_client
+
+    with pytest.raises(EmailServiceError, match="address_id"):
+        service.create_email()
+
+
 def test_login_address_posts_plain_password_without_hashing():
     service = TempMailService({
         "base_url": "https://mail.example.com",
@@ -471,6 +506,7 @@ def test_get_verification_code_does_not_use_admin_or_user_mail_endpoints():
         "domain": "example.com",
     })
     fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt-2", "address": "tester@example.com"}),
         FakeResponse(payload={"results": [], "count": 0}),
     ])
     service.http_client = fake_client
@@ -482,3 +518,75 @@ def test_get_verification_code_does_not_use_admin_or_user_mail_endpoints():
         "/admin/mails" not in call["url"] and "/user_api/mails" not in call["url"]
         for call in fake_client.calls
     )
+
+
+def test_get_verification_code_uses_shared_cached_password_for_cold_cache_instance():
+    creator = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    creator.http_client = FakeHTTPClient([
+        FakeResponse(payload={
+            "address": "cold@example.com",
+            "jwt": "create-jwt",
+            "password": "plain-password",
+            "address_id": "addr-99",
+        }),
+    ])
+    creator.create_email()
+
+    reader = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(payload={"jwt": "fresh-jwt", "address": "cold@example.com"}),
+        FakeResponse(payload={
+            "results": [
+                {
+                    "id": "mail-1",
+                    "source": "noreply@openai.com",
+                    "subject": "OpenAI verification",
+                    "text": "Your verification code is 246810",
+                }
+            ],
+            "count": 1,
+        }),
+    ])
+    reader.http_client = fake_client
+
+    code = reader.get_verification_code(email="cold@example.com", email_id="addr-99", timeout=1)
+
+    assert code == "246810"
+    assert fake_client.calls[0]["url"] == "https://mail.example.com/api/address_login"
+    assert fake_client.calls[0]["kwargs"]["json"] == {
+        "email": "cold@example.com",
+        "password": "plain-password",
+    }
+    assert fake_client.calls[1]["url"] == "https://mail.example.com/api/mails"
+    assert fake_client.calls[1]["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
+
+
+def test_401_with_custom_auth_and_bearer_error_is_not_mislabeled_as_site_password():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "site_password": "site-secret",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(status_code=401, payload={"error": "invalid bearer token"}),
+    ])
+    service.http_client = fake_client
+
+    with pytest.raises(EmailServiceError, match="invalid bearer token") as exc_info:
+        service._make_request(
+            "GET",
+            "/api/mails",
+            params={"limit": 20, "offset": 0},
+            headers={"Authorization": "Bearer stale-jwt"},
+        )
+
+    assert "site_password" not in str(exc_info.value)

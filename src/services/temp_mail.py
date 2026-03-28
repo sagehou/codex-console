@@ -36,6 +36,9 @@ class TempMailService(BaseEmailService):
     不走代理，不使用 requests 库
     """
 
+    _shared_email_cache: Dict[str, Dict[str, Any]] = {}
+    _shared_address_index: Dict[Tuple[str, str], str] = {}
+
     def __init__(self, config: Dict[str, Any] = None, name: str = None):
         """
         初始化 TempMail 服务
@@ -76,6 +79,94 @@ class TempMailService(BaseEmailService):
         self._email_cache: Dict[str, Dict[str, Any]] = {}
         # 记录每个邮箱上一次成功使用的邮件 ID，避免重复使用旧验证码
         self._last_used_mail_ids: Dict[str, str] = {}
+
+    def _cache_scope_key(self) -> str:
+        return str(self.config.get("base_url") or "").rstrip("/")
+
+    def _normalize_cache_record(self, info: Optional[Dict[str, Any]], fallback_email: Optional[str] = None) -> Dict[str, Any]:
+        data = dict(info or {})
+        email = str(data.get("email") or fallback_email or "").strip()
+        jwt = str(data.get("jwt") or "").strip()
+        password = str(data.get("password") or "").strip()
+        address_id = str(data.get("address_id") or data.get("addressId") or data.get("id") or "").strip()
+        normalized = {**data}
+        if email:
+            normalized["email"] = email
+        if jwt:
+            normalized["jwt"] = jwt
+        else:
+            normalized.pop("jwt", None)
+        if password:
+            normalized["password"] = password
+        else:
+            normalized.pop("password", None)
+        if address_id:
+            normalized["address_id"] = address_id
+        return normalized
+
+    def _persist_email_cache(self, info: Dict[str, Any], alias_email: Optional[str] = None) -> Dict[str, Any]:
+        cls = type(self)
+        normalized = self._normalize_cache_record(info, fallback_email=alias_email)
+        email = str(normalized.get("email") or alias_email or "").strip()
+        if not email:
+            return normalized
+
+        normalized["email"] = email
+        existing = self._email_cache.get(email, {}).copy()
+        merged = {**existing, **normalized}
+        self._email_cache[email] = merged
+
+        scope_key = self._cache_scope_key()
+        shared_key = f"{scope_key}|{email}"
+        shared_existing = cls._shared_email_cache.get(shared_key, {}).copy()
+        shared_merged = {**shared_existing, **merged}
+        cls._shared_email_cache[shared_key] = shared_merged
+
+        address_id = str(shared_merged.get("address_id") or "").strip()
+        if address_id:
+            cls._shared_address_index[(scope_key, address_id)] = email
+
+        if alias_email and alias_email != email:
+            alias_existing = self._email_cache.get(alias_email, {}).copy()
+            alias_merged = {**alias_existing, **shared_merged, "email": email}
+            self._email_cache[alias_email] = alias_merged
+            cls._shared_email_cache[f"{scope_key}|{alias_email}"] = alias_merged.copy()
+
+        return shared_merged
+
+    def _resolve_cached_address_state(self, email: str, email_id: Optional[str] = None) -> Dict[str, Any]:
+        cls = type(self)
+        normalized_email = str(email or "").strip()
+        normalized_email_id = str(email_id or "").strip()
+        scope_key = self._cache_scope_key()
+
+        candidates: List[Tuple[Optional[str], Dict[str, Any]]] = []
+        if normalized_email:
+            candidates.append((normalized_email, self._email_cache.get(normalized_email, {})))
+            candidates.append((normalized_email, cls._shared_email_cache.get(f"{scope_key}|{normalized_email}", {})))
+
+        if normalized_email_id:
+            indexed_email = cls._shared_address_index.get((scope_key, normalized_email_id))
+            if indexed_email:
+                candidates.append((indexed_email, cls._shared_email_cache.get(f"{scope_key}|{indexed_email}", {})))
+
+        merged: Dict[str, Any] = {}
+        resolved_email = normalized_email
+        for candidate_email, candidate in candidates:
+            if not candidate:
+                continue
+            normalized = self._normalize_cache_record(candidate, fallback_email=candidate_email or normalized_email)
+            if normalized:
+                merged.update(normalized)
+                resolved_email = str(normalized.get("email") or resolved_email or "").strip()
+
+        if normalized_email_id and not str(merged.get("address_id") or "").strip():
+            merged["address_id"] = normalized_email_id
+        if resolved_email:
+            merged["email"] = resolved_email
+        if merged:
+            return self._persist_email_cache(merged, alias_email=normalized_email or resolved_email)
+        return {"email": normalized_email, "address_id": normalized_email_id} if (normalized_email or normalized_email_id) else {}
 
     def _decode_mime_header(self, value: str) -> str:
         """解码 MIME 头，兼容 RFC 2047 编码主题。"""
@@ -515,10 +606,18 @@ class TempMailService(BaseEmailService):
                             "jwt",
                             "token",
                             "expired",
+                            "authorization",
                             "invalid authorization",
                             "missing authorization",
                         )
-                        if not any(signal in error_blob_l for signal in stronger_auth_signals):
+                        custom_auth_signals = (
+                            "custom auth",
+                            "x-custom-auth",
+                            "site password",
+                        )
+                        if any(signal in error_blob_l for signal in custom_auth_signals) and not any(
+                            signal in error_blob_l for signal in stronger_auth_signals
+                        ):
                             msg = (
                                 f"请求失败: {status_code} - TempMail site_password misconfiguration: "
                                 "x-custom-auth was rejected"
@@ -585,6 +684,8 @@ class TempMailService(BaseEmailService):
 
             if not address or not password or not jwt:
                 raise EmailServiceError(f"API 返回数据不完整: {response}")
+            if not address_id:
+                raise EmailServiceError(f"API 返回数据缺少 address_id: {response}")
 
             email_info = {
                 "email": address,
@@ -597,7 +698,7 @@ class TempMailService(BaseEmailService):
             }
 
             # 缓存 jwt，供获取验证码时使用
-            self._email_cache[address] = email_info
+            self._persist_email_cache(email_info)
 
             logger.info(f"成功创建 TempMail 邮箱: {address}")
             self.update_status(True)
@@ -628,18 +729,13 @@ class TempMailService(BaseEmailService):
         if not jwt or not address:
             raise EmailServiceError(f"TempMail address login returned incomplete data: {response}")
 
-        cached = self._email_cache.get(address, {}).copy()
+        cached = self._resolve_cached_address_state(address)
         cached.update({
             "email": address,
             "jwt": jwt,
             "password": password,
         })
-        self._email_cache[address] = cached
-        if address != email:
-            alias_cached = self._email_cache.get(email, {}).copy()
-            alias_cached.update(cached)
-            self._email_cache[email] = alias_cached
-        return cached
+        return self._persist_email_cache(cached, alias_email=email)
 
     def get_verification_code(
         self,
@@ -669,8 +765,9 @@ class TempMailService(BaseEmailService):
         last_used_mail_id = self._last_used_mail_ids.get(email)
         unknown_ts_grace_seconds = 15
 
-        # 优先使用地址级 JWT；若缓存缺失则尝试地址密码登录刷新 JWT。
-        cached = self._email_cache.get(email, {})
+        # 优先走上游锁定的 address_login -> /api/mails 流程；仅在无密码时回退到已有地址 JWT。
+        cached = self._resolve_cached_address_state(email=email, email_id=email_id)
+        resolved_email = str(cached.get("email") or email).strip() or email
         jwt = str(cached.get("jwt") or "").strip() or None
         password = str(cached.get("password") or "").strip()
         address_id = (
@@ -678,8 +775,8 @@ class TempMailService(BaseEmailService):
             or str(email_id or "").strip()
             or None
         )
-        if not jwt and password:
-            login_info = self._login_address(email, password)
+        if password:
+            login_info = self._login_address(resolved_email, password)
             jwt = str(login_info.get("jwt") or "").strip() or None
         poll_count = 0
 
