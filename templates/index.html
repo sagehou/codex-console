@@ -166,24 +166,21 @@
         <main class="main-content">
             <div class="two-column-layout">
                 <!-- 左侧面板 - 注册设置 -->
-                <div class="left-panel">
+                <div class="left-panel" id="registration-primary-panel" data-primary-controls="registration">
                     <div class="card">
                         <div class="card-header">
                             <h3>📝 注册设置</h3>
                         </div>
                         <div class="card-body">
                             <form id="registration-form">
-                                <div class="form-group">
-                                    <label for="email-service">邮箱服务</label>
-                                    <select id="email-service" name="email_service" required>
-                                        <option value="tempmail:default">Tempmail.lol (临时邮箱)</option>
-                                        <option value="outlook">Outlook</option>
-                                        <option value="moe_mail">MoeMail</option>
-                                        <option value="temp_mail">Temp-Mail 自部署</option>
-                                        <option value="duck_mail">DuckMail</option>
-                                        <option value="imap_mail">IMAP 邮箱</option>
-                                        <option value="outlook_batch:all">Outlook 批量注册</option>
+                                <div class="form-group" data-registration-email-row="tempmail-hint">
+                                    <label for="registration-email-service">邮箱服务</label>
+                                    <select id="registration-email-service" name="email_service" required>
+                                        <option value="">加载邮箱服务中...</option>
                                     </select>
+                                    <small id="registration-tempmail-hint" style="display: block; margin-top: var(--spacing-xs); color: var(--text-muted); font-size: 0.75rem;">
+                                        TempMail 多域名提示：多个域名请在邮箱服务页使用英文逗号分隔，例如：a.com,b.com,c.com
+                                    </small>
                                 </div>
 
                                 <!-- Outlook 批量注册区域 -->
@@ -231,20 +228,23 @@
                                     </div>
                                 </div>
 
-                                <div class="form-group" id="reg-mode-group">
-                                    <label for="reg-mode">注册模式</label>
-                                    <select id="reg-mode" name="reg_mode">
-                                        <option value="single">单次注册</option>
-                                        <option value="batch">批量注册</option>
-                                    </select>
+                                <div id="registration-mode-controls">
+                                    <div class="form-group" id="reg-mode-group">
+                                        <label for="reg-mode">注册模式</label>
+                                        <select id="reg-mode" name="reg_mode">
+                                            <option value="single">单次注册</option>
+                                            <option value="batch">批量注册</option>
+                                        </select>
+                                    </div>
                                 </div>
 
-                                <div class="form-group" id="batch-count-group" style="display: none;">
-                                    <label for="batch-count">注册数量 (1-100)</label>
-                                    <input type="number" id="batch-count" name="batch_count" min="1" max="100" value="5">
-                                </div>
+                                <div id="registration-batch-parameters">
+                                    <div class="form-group" id="batch-count-group" style="display: none;">
+                                        <label for="batch-count">注册数量 (1-100)</label>
+                                        <input type="number" id="batch-count" name="batch_count" min="1" max="100" value="5">
+                                    </div>
 
-                                <div id="batch-options" style="display: none;">
+                                    <div id="batch-options" style="display: none;">
                                     <div class="form-group">
                                         <label for="concurrency-mode">并发模式</label>
                                         <select id="concurrency-mode" name="concurrency_mode">
@@ -272,8 +272,14 @@
                                     </div>
                                 </div>
 
+                                </div>
+
                                 <div class="form-group" id="auto-upload-group">
                                     <label style="font-weight: 500; margin-bottom: var(--spacing-xs); display: block;">注册后自动操作</label>
+                                    <div id="registration-auto-upload-controls">
+                                        <small style="display: block; margin-bottom: var(--spacing-sm); color: var(--text-muted); font-size: 0.75rem;">
+                                            CPA 上传直接使用已配置的 CPA 服务，保持与 CLIProxy 当前的 CPA 服务模型一致。
+                                        </small>
 
                                     <!-- CPA -->
                                     <label style="display: flex; align-items: center; gap: var(--spacing-sm); cursor: pointer;">
@@ -301,6 +307,7 @@
                                     <div id="tm-service-select-group" style="display:none; margin-top: 6px; padding-left: 4px;">
                                         <div class="multi-select-dropdown" id="tm-service-select"></div>
                                     </div>
+                                    </div>
                                 </div>
 
                                 <div class="form-actions" style="flex-direction: column;">
@@ -319,7 +326,7 @@
                 <!-- 右侧面板 -->
                 <div class="right-panel">
                     <!-- 监控台 -->
-                    <div class="card" id="console-card">
+                    <div class="card" id="console-card" data-high-frequency-panel="run-monitor">
                         <div class="card-header">
                             <h3>💻 监控台</h3>
                             <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
@@ -327,7 +334,7 @@
                                 <button class="btn btn-ghost btn-sm" id="clear-log-btn">清空</button>
                             </div>
                         </div>
-                        <div class="card-body" style="padding: 0;">
+                        <div class="card-body" id="registration-run-monitor" style="padding: 0;">
                             <!-- 任务状态行 -->
                             <div class="task-status-row" id="task-status-row" style="display: none;">
                                 <div class="task-status-item">

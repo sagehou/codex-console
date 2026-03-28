@@ -2,7 +2,10 @@
 数据库 CRUD 操作
 """
 
-from typing import List, Optional, Dict, Any, Union
+import hashlib
+import json
+
+from typing import List, Optional, Dict, Any, Union, Iterable
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, asc, func, text
@@ -10,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .models import (
     Account,
+    BatchSubscriptionTask,
     EmailService,
     RegistrationTask,
     Setting,
@@ -22,6 +26,354 @@ from .models import (
     MaintenanceActionLog,
     AuditLog,
 )
+
+
+BATCH_SUBSCRIPTION_TASK_TYPE = "batch_subscription_check"
+BATCH_SUBSCRIPTION_ACTIVE_STATUSES = {"queued", "running"}
+BATCH_SUBSCRIPTION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+BATCH_SUBSCRIPTION_TASK_RETENTION_LIMIT = 50
+BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT = 500
+
+
+def build_batch_subscription_owner_key(session_id: str) -> str:
+    digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    return f"session:{digest}"
+
+
+def build_batch_subscription_request_key(
+    *,
+    account_ids: List[int],
+    select_all: bool,
+    status_filter: Optional[str],
+    email_service_filter: Optional[str],
+    search_filter: Optional[str],
+    proxy: Optional[str],
+) -> str:
+    if select_all:
+        scope_payload = {
+            "kind": "filter_snapshot",
+            "email_service_filter": email_service_filter or "",
+            "search_filter": search_filter or "",
+            "status_filter": status_filter or "",
+        }
+    else:
+        scope_payload = {
+            "kind": "account_ids",
+            "account_ids": sorted({int(account_id) for account_id in account_ids}),
+        }
+
+    request_identity = {
+        "task_type": BATCH_SUBSCRIPTION_TASK_TYPE,
+        "proxy": proxy or "",
+        "scope": scope_payload,
+    }
+    serialized = json.dumps(request_identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _utcnow() -> datetime:
+    return datetime.utcnow()
+
+
+def _apply_batch_subscription_task_retention(db: Session, owner_key: str) -> None:
+    retained_terminal_ids = [
+        task_id
+        for (task_id,) in (
+            db.query(BatchSubscriptionTask.id)
+            .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+            .filter(BatchSubscriptionTask.owner_key == owner_key)
+            .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_TERMINAL_STATUSES))
+            .order_by(desc(BatchSubscriptionTask.id))
+            .limit(BATCH_SUBSCRIPTION_TASK_RETENTION_LIMIT)
+            .all()
+        )
+    ]
+    if not retained_terminal_ids:
+        return
+
+    (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.owner_key == owner_key)
+        .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_TERMINAL_STATUSES))
+        .filter(~BatchSubscriptionTask.id.in_(retained_terminal_ids))
+        .delete(synchronize_session=False)
+    )
+
+
+def _trim_batch_subscription_task_logs(task: BatchSubscriptionTask) -> None:
+    lines = task.get_recent_log_lines()
+    if len(lines) <= BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT:
+        return
+    task.set_recent_log_lines(lines[-BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT:])
+
+
+def mark_batch_subscription_task_terminal(
+    db: Session,
+    task_id: int,
+    *,
+    status: str,
+) -> Optional[BatchSubscriptionTask]:
+    if status not in BATCH_SUBSCRIPTION_TERMINAL_STATUSES:
+        raise ValueError(f"Unsupported terminal status: {status}")
+
+    task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id).first()
+    if task is None:
+        return None
+
+    task.status = status
+    task.active_scope_key = None
+    if task.completed_at is None:
+        task.completed_at = _utcnow()
+    task.updated_at = _utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def create_or_reuse_batch_subscription_task(
+    db: Session,
+    *,
+    owner_key: str,
+    scope_key: str,
+    total_count: int,
+    proxy: Optional[str],
+    session_id: Optional[str],
+    request_payload: Dict[str, Any],
+) -> tuple[BatchSubscriptionTask, bool]:
+    request_payload = dict(request_payload)
+    request_key = request_payload.get("request_key") or scope_key
+    existing = (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.owner_key == owner_key)
+        .filter(BatchSubscriptionTask.active_scope_key == request_key)
+        .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_ACTIVE_STATUSES))
+        .order_by(desc(BatchSubscriptionTask.id))
+        .first()
+    )
+    if existing:
+        return existing, True
+
+    task = BatchSubscriptionTask(
+        task_type=BATCH_SUBSCRIPTION_TASK_TYPE,
+        owner_key=owner_key,
+        session_id=session_id,
+        scope_key=request_key,
+        active_scope_key=request_key,
+        status="queued",
+        proxy=proxy,
+        total_count=total_count,
+        processed_count=0,
+        success_count=0,
+        failure_count=0,
+        current_account=None,
+        request_payload=request_payload,
+        recent_logs="",
+    )
+    db.add(task)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        existing = (
+            db.query(BatchSubscriptionTask)
+            .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+            .filter(BatchSubscriptionTask.owner_key == owner_key)
+            .filter(BatchSubscriptionTask.active_scope_key == request_key)
+            .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_ACTIVE_STATUSES))
+            .order_by(desc(BatchSubscriptionTask.id))
+            .first()
+        )
+        if existing:
+            return existing, True
+        raise
+    _apply_batch_subscription_task_retention(db, owner_key)
+    db.commit()
+    db.refresh(task)
+    return task, False
+
+
+def get_batch_subscription_task_by_id(
+    db: Session,
+    task_id: int,
+    *,
+    owner_key: Optional[str] = None,
+) -> Optional[BatchSubscriptionTask]:
+    query = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id)
+    if owner_key is not None:
+        query = query.filter(BatchSubscriptionTask.owner_key == owner_key)
+    return query.first()
+
+
+def get_latest_active_batch_subscription_task(
+    db: Session,
+    *,
+    owner_key: str,
+    scope_key: Optional[str] = None,
+) -> Optional[BatchSubscriptionTask]:
+    query = (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.owner_key == owner_key)
+        .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_ACTIVE_STATUSES))
+    )
+    if scope_key is not None:
+        query = query.filter(BatchSubscriptionTask.scope_key == scope_key)
+    return query.order_by(desc(BatchSubscriptionTask.id)).first()
+
+
+def get_batch_subscription_task_log_slice(
+    task: BatchSubscriptionTask,
+    *,
+    offset: int = 0,
+) -> tuple[List[str], int]:
+    normalized_offset = max(int(offset or 0), 0)
+    lines = task.get_recent_log_lines()
+    return lines[normalized_offset:], len(lines)
+
+
+def calculate_batch_subscription_progress_percent(task: BatchSubscriptionTask) -> int:
+    total_count = max(int(task.total_count or 0), 0)
+    processed_count = max(int(task.processed_count or 0), 0)
+    if total_count <= 0:
+        return 0
+    return min(100, round((processed_count * 100) / total_count))
+
+
+def get_latest_batch_subscription_task(
+    db: Session,
+    *,
+    owner_key: str,
+) -> Optional[BatchSubscriptionTask]:
+    return (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.owner_key == owner_key)
+        .order_by(desc(BatchSubscriptionTask.id))
+        .first()
+    )
+
+
+def list_batch_subscription_tasks_for_owner(
+    db: Session,
+    *,
+    owner_key: str,
+) -> List[BatchSubscriptionTask]:
+    return (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.owner_key == owner_key)
+        .order_by(desc(BatchSubscriptionTask.id))
+        .all()
+    )
+
+
+def append_batch_subscription_task_logs(
+    db: Session,
+    task_id: int,
+    lines: Iterable[str],
+) -> Optional[BatchSubscriptionTask]:
+    task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id).first()
+    if task is None:
+        return None
+
+    existing_lines = task.get_recent_log_lines()
+    existing_lines.extend(str(line) for line in lines)
+    task.set_recent_log_lines(existing_lines[-BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT:])
+    task.updated_at = _utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def start_batch_subscription_task(db: Session, task_id: int) -> Optional[BatchSubscriptionTask]:
+    task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id).first()
+    if task is None:
+        return None
+    if task.status != "queued":
+        return task
+
+    now = _utcnow()
+    task.status = "running"
+    task.started_at = task.started_at or now
+    task.updated_at = now
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def update_batch_subscription_task_progress(
+    db: Session,
+    task_id: int,
+    *,
+    processed_count: int,
+    success_count: int,
+    failure_count: int,
+    current_account: Optional[str],
+    log_lines: Iterable[str] = (),
+) -> Optional[BatchSubscriptionTask]:
+    task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id).first()
+    if task is None:
+        return None
+
+    task.processed_count = processed_count
+    task.success_count = success_count
+    task.failure_count = failure_count
+    task.current_account = current_account
+    if log_lines:
+        existing_lines = task.get_recent_log_lines()
+        existing_lines.extend(str(line) for line in log_lines)
+        task.set_recent_log_lines(existing_lines[-BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT:])
+    task.updated_at = _utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def finalize_batch_subscription_task(
+    db: Session,
+    task_id: int,
+    *,
+    status: str,
+    current_account: Optional[str] = None,
+    log_lines: Iterable[str] = (),
+) -> Optional[BatchSubscriptionTask]:
+    if status not in BATCH_SUBSCRIPTION_TERMINAL_STATUSES:
+        raise ValueError(f"Unsupported terminal status: {status}")
+
+    task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == task_id).first()
+    if task is None:
+        return None
+
+    task.status = status
+    task.active_scope_key = None
+    task.current_account = current_account
+    if log_lines:
+        existing_lines = task.get_recent_log_lines()
+        existing_lines.extend(str(line) for line in log_lines)
+        task.set_recent_log_lines(existing_lines[-BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT:])
+    task.completed_at = _utcnow()
+    task.updated_at = task.completed_at
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def reconcile_abandoned_batch_subscription_tasks(db: Session) -> int:
+    abandoned_tasks = (
+        db.query(BatchSubscriptionTask)
+        .filter(BatchSubscriptionTask.task_type == BATCH_SUBSCRIPTION_TASK_TYPE)
+        .filter(BatchSubscriptionTask.status.in_(BATCH_SUBSCRIPTION_ACTIVE_STATUSES))
+        .all()
+    )
+    reconciled_count = 0
+    for task in abandoned_tasks:
+        task.current_account = None
+        _trim_batch_subscription_task_logs(task)
+        mark_batch_subscription_task_terminal(db, task.id, status="interrupted")
+        reconciled_count += 1
+    return reconciled_count
 
 
 # ============================================================================
@@ -804,6 +1156,82 @@ def get_cpa_services(
     return query.order_by(asc(CpaService.priority), asc(CpaService.id)).all()
 
 
+CLIPROXY_CPA_REQUIRED_FIELDS = ("api_url", "api_token")
+
+
+def get_cpa_service_missing_required_fields(service: CpaService) -> List[str]:
+    missing_fields: List[str] = []
+    for field_name in CLIPROXY_CPA_REQUIRED_FIELDS:
+        value = getattr(service, field_name, None)
+        if value is None or not str(value).strip():
+            missing_fields.append(field_name)
+    return missing_fields
+
+
+def serialize_cliproxy_selectable_cpa_service(service: CpaService) -> Dict[str, Any]:
+    missing_fields = get_cpa_service_missing_required_fields(service)
+    config_complete = len(missing_fields) == 0
+    reason = None if config_complete else "config incomplete"
+    return {
+        "id": service.id,
+        "name": service.name,
+        "enabled": bool(service.enabled),
+        "priority": service.priority,
+        "config_status": "ready" if config_complete else "config incomplete",
+        "missing_required_fields": missing_fields,
+        "action_state": {
+            "test_connection": {"enabled": config_complete, "reason": reason},
+            "scan": {"enabled": config_complete, "reason": reason},
+            "maintain": {"enabled": config_complete, "reason": reason},
+        },
+    }
+
+
+def get_cliproxy_selectable_cpa_services(db: Session) -> List[Dict[str, Any]]:
+    services = get_cpa_services(db, enabled=True)
+    return [serialize_cliproxy_selectable_cpa_service(service) for service in services]
+
+
+def get_cliproxy_environment_for_cpa_service(db: Session, service_id: int) -> Optional[CLIProxyAPIEnvironment]:
+    return (
+        db.query(CLIProxyAPIEnvironment)
+        .filter(CLIProxyAPIEnvironment.provider == "cpa_service")
+        .filter(CLIProxyAPIEnvironment.provider_scope == str(service_id))
+        .order_by(desc(CLIProxyAPIEnvironment.id))
+        .first()
+    )
+
+
+def ensure_cliproxy_environment_for_cpa_service(db: Session, service: CpaService) -> CLIProxyAPIEnvironment:
+    environment = get_cliproxy_environment_for_cpa_service(db, service.id)
+    environment_name = f"cpa-service-{service.id}-{service.name}"
+    if environment is None:
+        return create_cliproxy_environment(
+            db,
+            name=environment_name,
+            base_url=service.api_url,
+            token=service.api_token,
+            target_type="cpa",
+            provider="cpa_service",
+            provider_scope=str(service.id),
+            enabled=service.enabled,
+            notes=f"Auto-managed from CPA service {service.id}",
+        )
+
+    return update_cliproxy_environment(
+        db,
+        environment.id,
+        name=environment_name,
+        base_url=service.api_url,
+        token=service.api_token,
+        target_type="cpa",
+        provider="cpa_service",
+        provider_scope=str(service.id),
+        enabled=service.enabled,
+        notes=f"Auto-managed from CPA service {service.id}",
+    )
+
+
 def update_cpa_service(
     db: Session,
     service_id: int,
@@ -968,6 +1396,9 @@ def delete_tm_service(db: Session, service_id: int) -> bool:
 MAINTENANCE_RUN_TYPES = {"scan", "maintain", "refill"}
 MAINTENANCE_RUN_IN_FLIGHT_STATUSES = {"queued", "running", "cancelling"}
 MAINTENANCE_RUN_METADATA_FIELDS = {"current_stage", "progress_percent", "cancellable", "idempotency_key", "request"}
+CLIPROXY_AGGREGATE_TASK_STATUSES = {"queued", "running", "completed", "failed", "cancelled", "interrupted"}
+CLIPROXY_AGGREGATE_ACTIVE_STATUSES = {"queued", "running"}
+CLIPROXY_AGGREGATE_KINDS = {"cliproxy_aggregate"}
 REFILL_RESERVED_V1_ERROR = "CLIProxy refill is reserved in v1 and not enabled"
 
 
@@ -989,6 +1420,262 @@ def _merge_maintenance_summary(
             merged[key] = kwargs.pop(key)
             touched = True
     return merged if touched else summary_json
+
+
+def normalize_cliproxy_service_ids(service_ids: Iterable[int]) -> List[int]:
+    return sorted({int(service_id) for service_id in service_ids})
+
+
+def build_cliproxy_aggregate_scope_key(*, run_type: str, service_ids: Iterable[int]) -> str:
+    normalized_service_ids = normalize_cliproxy_service_ids(service_ids)
+    return f"{run_type}:{','.join(str(service_id) for service_id in normalized_service_ids)}"
+
+
+def build_cliproxy_aggregate_summary(*, run_type: str, services: List[Dict[str, Any]], request_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    normalized_service_ids = normalize_cliproxy_service_ids(item["service_id"] for item in services)
+    aggregate_key = build_cliproxy_aggregate_scope_key(run_type=run_type, service_ids=normalized_service_ids)
+    return {
+        "request": dict(request_data or {}),
+        "owner_session_id": None,
+        "aggregate_key": aggregate_key,
+        "service_ids": normalized_service_ids,
+        "current_stage": "queued",
+        "progress_percent": 0,
+        "cancellable": False,
+        "task_id": None,
+        "status": "queued",
+        "run_type": run_type,
+        "service_total": len(services),
+        "service_completed": 0,
+        "known_record_total": None,
+        "processed_record_total": 0,
+        "services": services,
+        "grouped_logs": {str(item["service_id"]): [] for item in services},
+        "grouped_results": {str(item["service_id"]): {} for item in services},
+    }
+
+
+def _normalize_cliproxy_grouped_service_data(
+    services: List[Dict[str, Any]],
+    grouped_data: Optional[Dict[str, Any]],
+    default_factory,
+) -> Dict[str, Any]:
+    normalized = {str(item["service_id"]): default_factory() for item in services}
+    for key, value in dict(grouped_data or {}).items():
+        if key in normalized:
+            normalized[key] = value
+    return normalized
+
+
+def serialize_cliproxy_aggregate_task(run: MaintenanceRun) -> Dict[str, Any]:
+    summary = dict(run.summary_json or {})
+    services = list(summary.get("services") or [])
+    grouped_logs = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_logs"), list)
+    grouped_results = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_results"), dict)
+    return {
+        "task_id": str(run.id),
+        "status": run.status,
+        "run_type": run.run_type,
+        "current_stage": summary.get("current_stage"),
+        "cancellable": bool(summary.get("cancellable", False)),
+        "service_total": int(summary.get("service_total") or len(services)),
+        "service_completed": int(summary.get("service_completed") or 0),
+        "known_record_total": summary.get("known_record_total"),
+        "processed_record_total": int(summary.get("processed_record_total") or 0),
+        "progress_percent": int(summary.get("progress_percent") or 0),
+        "services": services,
+        "grouped_logs": grouped_logs,
+        "grouped_results": grouped_results,
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "updated_at": run.updated_at.isoformat() if run.updated_at else None,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "error_message": run.error_message,
+    }
+
+
+def calculate_cliproxy_child_progress_percent(service: Dict[str, Any]) -> int:
+    status = str(service.get("status") or "")
+    known_record_total = service.get("known_record_total")
+    processed_count = max(int(service.get("processed_count") or 0), 0)
+    if status == "completed":
+        return 100
+    if status in {"failed", "interrupted", "cancelled"}:
+        return 100
+    if known_record_total is None:
+        stage = str(service.get("current_stage") or "queued")
+        if stage == "queued":
+            return 0
+        if stage == "fetching_inventory":
+            return 10
+        if stage == "running":
+            return 15
+        return 20
+    total = max(int(known_record_total or 0), 0)
+    if total <= 0:
+        return 100 if status == "completed" else 20
+    return min(100, round((processed_count * 100) / total))
+
+
+def _calculate_cliproxy_parent_progress(services: List[Dict[str, Any]]) -> int:
+    if not services:
+        return 0
+    return round(sum(calculate_cliproxy_child_progress_percent(item) for item in services) / len(services))
+
+
+def _build_cliproxy_grouped_results_for_service(service: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "records": int(service.get("processed_count") or 0),
+        "success_count": int(service.get("success_count") or 0),
+        "failure_count": int(service.get("failure_count") or 0),
+        "status": service.get("status"),
+        "last_error": service.get("last_error"),
+    }
+
+
+def update_cliproxy_aggregate_service(
+    db: Session,
+    task_id: int,
+    *,
+    service_id: int,
+    status: Optional[str] = None,
+    known_record_total: Optional[int] = None,
+    processed_count: Optional[int] = None,
+    success_count: Optional[int] = None,
+    failure_count: Optional[int] = None,
+    current_stage: Optional[str] = None,
+    last_error: Optional[str] = None,
+    log_lines: Optional[Iterable[str]] = None,
+    result_summary: Optional[Dict[str, Any]] = None,
+) -> Optional[MaintenanceRun]:
+    run = get_maintenance_run_by_id(db, task_id)
+    if run is None or not is_cliproxy_aggregate_task(run):
+        return None
+
+    summary = dict(run.summary_json or {})
+    services = [dict(item) for item in list(summary.get("services") or [])]
+    grouped_logs = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_logs"), list)
+    grouped_results = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_results"), dict)
+
+    updated_service = None
+    for item in services:
+        if int(item.get("service_id") or 0) != int(service_id):
+            continue
+        if status is not None:
+            item["status"] = status
+        if known_record_total is not None:
+            item["known_record_total"] = known_record_total
+        if processed_count is not None:
+            item["processed_count"] = processed_count
+        if success_count is not None:
+            item["success_count"] = success_count
+        if failure_count is not None:
+            item["failure_count"] = failure_count
+        if current_stage is not None:
+            item["current_stage"] = current_stage
+        if last_error is not None or status == "completed":
+            item["last_error"] = last_error
+        updated_service = item
+        break
+
+    if updated_service is None:
+        return run
+
+    service_key = str(int(service_id))
+    if log_lines:
+        grouped_logs[service_key] = list(grouped_logs.get(service_key) or []) + [str(line) for line in log_lines]
+    grouped_results[service_key] = dict(result_summary or _build_cliproxy_grouped_results_for_service(updated_service))
+
+    service_total = len(services)
+    service_completed = sum(1 for item in services if item.get("status") in {"completed", "failed", "cancelled", "interrupted"})
+    known_totals = [int(item.get("known_record_total") or 0) for item in services if item.get("known_record_total") is not None]
+    summary["services"] = services
+    summary["grouped_logs"] = grouped_logs
+    summary["grouped_results"] = grouped_results
+    summary["service_total"] = service_total
+    summary["service_completed"] = service_completed
+    summary["known_record_total"] = sum(known_totals) if len(known_totals) == service_total else None
+    summary["processed_record_total"] = sum(int(item.get("processed_count") or 0) for item in services)
+    summary["progress_percent"] = _calculate_cliproxy_parent_progress(services)
+    summary["current_stage"] = current_stage or summary.get("current_stage") or "running"
+    summary["status"] = run.status
+
+    run.summary_json = summary
+    run.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def finalize_cliproxy_aggregate_task(
+    db: Session,
+    task_id: int,
+    *,
+    status: str,
+    current_stage: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> Optional[MaintenanceRun]:
+    run = get_maintenance_run_by_id(db, task_id)
+    if run is None or not is_cliproxy_aggregate_task(run):
+        return None
+    summary = dict(run.summary_json or {})
+    services = [dict(item) for item in list(summary.get("services") or [])]
+    if status in {"failed", "interrupted", "cancelled"}:
+        for item in services:
+            if item.get("status") in CLIPROXY_AGGREGATE_ACTIVE_STATUSES:
+                item["status"] = status
+                item["current_stage"] = current_stage or status
+    summary["services"] = services
+    summary["service_total"] = len(services)
+    summary["service_completed"] = sum(1 for item in services if item.get("status") in {"completed", "failed", "cancelled", "interrupted"})
+    known_totals = [int(item.get("known_record_total") or 0) for item in services if item.get("known_record_total") is not None]
+    summary["known_record_total"] = sum(known_totals) if len(known_totals) == len(services) else None
+    summary["processed_record_total"] = sum(int(item.get("processed_count") or 0) for item in services)
+    summary["progress_percent"] = 100 if status in {"completed", "failed", "cancelled", "interrupted"} else _calculate_cliproxy_parent_progress(services)
+    summary["current_stage"] = current_stage or status
+    summary["status"] = status
+    summary["cancellable"] = False
+    run.summary_json = summary
+    run.status = status
+    run.error_message = error_message
+    run.completed_at = datetime.utcnow()
+    run.updated_at = run.completed_at
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+def is_cliproxy_aggregate_task(run: MaintenanceRun) -> bool:
+    if run.aggregate_kind in CLIPROXY_AGGREGATE_KINDS:
+        return True
+    summary = run.summary_json or {}
+    return bool(summary.get("aggregate_key") or summary.get("service_total") or summary.get("services"))
+
+
+def get_cliproxy_aggregate_task_owner_session_id(run: MaintenanceRun) -> Optional[str]:
+    owner_session_id = run.owner_session_id
+    if owner_session_id:
+        return _normalize_cliproxy_owner_session_id(owner_session_id)
+    summary = run.summary_json or {}
+    return _normalize_cliproxy_owner_session_id(summary.get("owner_session_id"))
+
+
+def get_cliproxy_aggregate_task_scope_key(run: MaintenanceRun) -> Optional[str]:
+    if run.aggregate_scope_key:
+        return run.aggregate_scope_key
+    summary = run.summary_json or {}
+    return summary.get("aggregate_key")
+
+
+def _normalize_cliproxy_owner_session_id(session_id: Optional[str]) -> Optional[str]:
+    if not session_id:
+        return None
+    try:
+        from ..web.auth import parse_session_cookie
+
+        return parse_session_cookie(session_id) or session_id
+    except Exception:
+        return session_id
 
 
 def create_cliproxy_environment(
@@ -1082,6 +1769,9 @@ def create_maintenance_run(
     status: str = "pending",
     summary_json: Optional[Dict[str, Any]] = None,
     error_message: Optional[str] = None,
+    owner_session_id: Optional[str] = None,
+    aggregate_scope_key: Optional[str] = None,
+    aggregate_kind: Optional[str] = None,
 ) -> MaintenanceRun:
     _validate_maintenance_run_type_enabled(run_type)
 
@@ -1090,6 +1780,9 @@ def create_maintenance_run(
     run = MaintenanceRun(
         run_type=run_type,
         environment_id=environment_id,
+        owner_session_id=owner_session_id,
+        aggregate_scope_key=aggregate_scope_key,
+        aggregate_kind=aggregate_kind,
         status=status,
         summary_json=summary_json,
         error_message=error_message,
@@ -1142,6 +1835,152 @@ def get_in_flight_maintenance_run(db: Session, environment_id: int) -> Optional[
         .order_by(desc(MaintenanceRun.id))
         .first()
     )
+
+
+def get_cliproxy_aggregate_task_by_id(
+    db: Session,
+    task_id: int,
+    *,
+    owner_session_id: Optional[str] = None,
+) -> Optional[MaintenanceRun]:
+    run = db.query(MaintenanceRun).filter(MaintenanceRun.id == task_id).first()
+    if run is None or not is_cliproxy_aggregate_task(run):
+        return None
+    if owner_session_id is not None and get_cliproxy_aggregate_task_owner_session_id(run) != owner_session_id:
+        return None
+    return run
+
+
+def get_latest_active_cliproxy_aggregate_task(
+    db: Session,
+    *,
+    owner_session_id: str,
+    run_type: Optional[str] = None,
+    aggregate_scope_key: Optional[str] = None,
+) -> Optional[MaintenanceRun]:
+    query = db.query(MaintenanceRun).filter(MaintenanceRun.status.in_(CLIPROXY_AGGREGATE_ACTIVE_STATUSES))
+    if run_type is not None:
+        query = query.filter(MaintenanceRun.run_type == run_type)
+    runs = query.order_by(desc(MaintenanceRun.id)).all()
+    for run in runs:
+        if not is_cliproxy_aggregate_task(run):
+            continue
+        if get_cliproxy_aggregate_task_owner_session_id(run) != owner_session_id:
+            continue
+        if aggregate_scope_key is not None and get_cliproxy_aggregate_task_scope_key(run) != aggregate_scope_key:
+            continue
+        return run
+    return None
+
+
+def create_or_reuse_cliproxy_aggregate_task(
+    db: Session,
+    *,
+    owner_session_id: str,
+    run_type: str,
+    service_ids: Iterable[int],
+    services: List[Dict[str, Any]],
+    request_data: Optional[Dict[str, Any]] = None,
+) -> tuple[MaintenanceRun, bool]:
+    normalized_service_ids = normalize_cliproxy_service_ids(service_ids)
+    if not normalized_service_ids:
+        raise ValueError("service_ids must not be empty")
+
+    aggregate_scope_key = build_cliproxy_aggregate_scope_key(run_type=run_type, service_ids=normalized_service_ids)
+    begin_immediate_transaction(db)
+
+    existing = get_latest_active_cliproxy_aggregate_task(
+        db,
+        owner_session_id=owner_session_id,
+        run_type=run_type,
+        aggregate_scope_key=aggregate_scope_key,
+    )
+    if existing is not None:
+        db.commit()
+        db.refresh(existing)
+        return existing, False
+
+    conflicting_run_type = "maintain" if run_type == "scan" else "scan"
+    conflicting_scope_key = build_cliproxy_aggregate_scope_key(run_type=conflicting_run_type, service_ids=normalized_service_ids)
+    conflict = get_latest_active_cliproxy_aggregate_task(
+        db,
+        owner_session_id=owner_session_id,
+        run_type=conflicting_run_type,
+        aggregate_scope_key=conflicting_scope_key,
+    )
+    if conflict is not None:
+        db.commit()
+        db.refresh(conflict)
+        raise ValueError(
+            json.dumps(
+                {
+                    "code": "cliproxy_aggregate_conflict",
+                    "message": "CLIProxy aggregate task already active for this service set",
+                    "active_run_type": conflict.run_type,
+                    "requested_run_type": run_type,
+                    "aggregate_key": get_cliproxy_aggregate_task_scope_key(conflict),
+                    "service_ids": normalized_service_ids,
+                },
+                sort_keys=True,
+            )
+        )
+
+    run = create_maintenance_run(
+        db,
+        run_type=run_type,
+        environment_id=None,
+        status="queued",
+        owner_session_id=owner_session_id,
+        aggregate_scope_key=aggregate_scope_key,
+        aggregate_kind="cliproxy_aggregate",
+        summary_json=build_cliproxy_aggregate_summary(
+            run_type=run_type,
+            services=services,
+            request_data=request_data,
+        ),
+    )
+    summary = dict(run.summary_json or {})
+    summary["task_id"] = str(run.id)
+    summary["owner_session_id"] = owner_session_id
+    summary["aggregate_key"] = aggregate_scope_key
+    summary["service_ids"] = normalized_service_ids
+    run.summary_json = summary
+    db.commit()
+    db.refresh(run)
+    return run, True
+
+
+def reconcile_abandoned_cliproxy_aggregate_tasks(db: Session) -> int:
+    runs = db.query(MaintenanceRun).filter(MaintenanceRun.status.in_(CLIPROXY_AGGREGATE_ACTIVE_STATUSES)).all()
+    reconciled_count = 0
+    for run in runs:
+        if not is_cliproxy_aggregate_task(run):
+            continue
+        summary = dict(run.summary_json or {})
+        services = []
+        for service in list(summary.get("services") or []):
+            item = dict(service)
+            item["status"] = "interrupted"
+            item["current_stage"] = "interrupted"
+            services.append(item)
+        summary["services"] = services
+        summary["status"] = "interrupted"
+        summary["cancellable"] = False
+        summary["owner_session_id"] = get_cliproxy_aggregate_task_owner_session_id(run)
+        summary["aggregate_key"] = get_cliproxy_aggregate_task_scope_key(run)
+        summary["service_ids"] = normalize_cliproxy_service_ids(item["service_id"] for item in services)
+        summary["grouped_logs"] = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_logs"), list)
+        summary["grouped_results"] = _normalize_cliproxy_grouped_service_data(services, summary.get("grouped_results"), dict)
+        run.summary_json = summary
+        run.aggregate_kind = "cliproxy_aggregate"
+        run.owner_session_id = get_cliproxy_aggregate_task_owner_session_id(run)
+        run.aggregate_scope_key = get_cliproxy_aggregate_task_scope_key(run)
+        run.status = "interrupted"
+        run.completed_at = run.completed_at or datetime.utcnow()
+        reconciled_count += 1
+    if reconciled_count:
+        db.commit()
+    return reconciled_count
 
 
 def begin_immediate_transaction(db: Session) -> None:

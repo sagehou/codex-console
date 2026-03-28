@@ -16,7 +16,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..config.settings import get_settings
-from .auth import build_webui_auth_token, is_webui_authenticated
+from ..database import crud
+from ..database.session import get_db
+from .auth import build_session_cookie_value, build_webui_auth_token, generate_session_id, get_current_session_id, is_webui_authenticated
 from .routes import api_router
 from .routes.websocket import router as ws_router
 from .task_manager import task_manager
@@ -33,6 +35,37 @@ else:
 # 静态文件和模板目录
 STATIC_DIR = _RESOURCE_ROOT / "static"
 TEMPLATES_DIR = _RESOURCE_ROOT / "templates"
+
+
+def reconcile_startup_batch_subscription_tasks() -> int:
+    with get_db() as db:
+        return crud.reconcile_abandoned_batch_subscription_tasks(db)
+
+
+def reconcile_startup_cliproxy_tasks() -> int:
+    with get_db() as db:
+        return crud.reconcile_abandoned_cliproxy_aggregate_tasks(db)
+
+
+def _build_cliproxy_page_context(request: Request) -> dict:
+    session_id = get_current_session_id(request)
+    try:
+        with get_db() as db:
+            cpa_services = crud.get_cliproxy_selectable_cpa_services(db)
+            latest_task = None
+            if session_id:
+                latest_task = crud.get_latest_active_cliproxy_aggregate_task(db, owner_session_id=session_id)
+    except RuntimeError:
+        cpa_services = []
+        latest_task = None
+
+    return {
+        "cliproxy_cpa_services": cpa_services,
+        "cliproxy_has_cpa_services": bool(cpa_services),
+        "cliproxy_has_ready_cpa_services": any(service.get("config_status") == "ready" for service in cpa_services),
+        "cliproxy_latest_active_task": crud.serialize_cliproxy_aggregate_task(latest_task) if latest_task else None,
+        "cliproxy_task_poll_interval_ms": 2000,
+    }
 
 
 def _build_static_asset_version(static_dir: Path) -> str:
@@ -133,6 +166,7 @@ def create_app() -> FastAPI:
 
         response = RedirectResponse(url=safe_next, status_code=302)
         response.set_cookie("webui_auth", build_webui_auth_token(expected), httponly=True, samesite="lax")
+        response.set_cookie("session_id", build_session_cookie_value(generate_session_id()), httponly=True, samesite="lax")
         return response
 
     @app.get("/logout")
@@ -140,6 +174,7 @@ def create_app() -> FastAPI:
         """退出登录"""
         response = RedirectResponse(url=_safe_next_path(next, "/login"), status_code=302)
         response.delete_cookie("webui_auth")
+        response.delete_cookie("session_id")
         return response
 
     @app.get("/", response_class=HTMLResponse)
@@ -161,7 +196,11 @@ def create_app() -> FastAPI:
         """CLIProxyAPI 管理页面"""
         if not is_webui_authenticated(request):
             return _redirect_to_login(request)
-        return templates.TemplateResponse(request=request, name="cliproxy.html")
+        return templates.TemplateResponse(
+            request=request,
+            name="cliproxy.html",
+            context=_build_cliproxy_page_context(request),
+        )
 
     @app.get("/email-services", response_class=HTMLResponse)
     async def email_services_page(request: Request):
@@ -195,6 +234,20 @@ def create_app() -> FastAPI:
             initialize_database()
         except Exception as e:
             logger.warning(f"数据库初始化: {e}")
+
+        try:
+            reconciled_count = reconcile_startup_batch_subscription_tasks()
+            if reconciled_count:
+                logger.info(f"批量订阅任务启动恢复完成，已标记 {reconciled_count} 个遗留运行任务为 interrupted")
+        except Exception as e:
+            logger.warning(f"批量订阅任务启动恢复失败: {e}")
+
+        try:
+            reconciled_count = reconcile_startup_cliproxy_tasks()
+            if reconciled_count:
+                logger.info(f"CLIProxy 聚合任务启动恢复完成，已标记 {reconciled_count} 个遗留运行任务为 interrupted")
+        except Exception as e:
+            logger.warning(f"CLIProxy 聚合任务启动恢复失败: {e}")
 
         # 设置 TaskManager 的事件循环
         loop = asyncio.get_event_loop()

@@ -6,23 +6,49 @@ import logging
 from typing import Optional, List
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
 from ...database.session import get_db
 from ...database.models import Account
 from ...database import crud
 from ...config.settings import get_settings
 from .accounts import resolve_account_ids
+from ..auth import build_session_cookie_value, ensure_session_id, require_webui_auth
 from ...core.openai.payment import (
     generate_plus_link,
     generate_team_link,
     open_url_incognito,
     check_subscription_status,
 )
+from ...core.tasks.batch_subscription_check import start_batch_subscription_check_task
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+dispatch_batch_subscription_task = start_batch_subscription_check_task
+
+
+def _get_batch_task_owner_key(http_request: Request) -> tuple[str, Optional[str]]:
+    require_webui_auth(http_request)
+    session_id, _ = ensure_session_id(http_request)
+    return crud.build_batch_subscription_owner_key(session_id), session_id
+
+
+def _serialize_batch_subscription_task(task, *, log_offset: int = 0) -> dict:
+    logs, next_log_offset = crud.get_batch_subscription_task_log_slice(task, offset=log_offset)
+    return {
+        "task_id": str(task.id),
+        "status": task.status,
+        "scope_key": task.scope_key,
+        "total_count": task.total_count,
+        "processed_count": task.processed_count,
+        "success_count": task.success_count,
+        "failure_count": task.failure_count,
+        "current_account": task.current_account,
+        "progress_percent": crud.calculate_batch_subscription_progress_percent(task),
+        "logs": logs,
+        "next_log_offset": next_log_offset,
+    }
 
 
 # ============== Pydantic Models ==============
@@ -48,7 +74,7 @@ class MarkSubscriptionRequest(BaseModel):
 
 
 class BatchCheckSubscriptionRequest(BaseModel):
-    ids: List[int] = []
+    ids: List[int] = Field(default_factory=list)
     proxy: Optional[str] = None
     select_all: bool = False
     status_filter: Optional[str] = None
@@ -123,42 +149,114 @@ def open_browser_incognito(request: OpenIncognitoRequest):
 # ============== 订阅状态 ==============
 
 @router.post("/accounts/batch-check-subscription")
-def batch_check_subscription(request: BatchCheckSubscriptionRequest):
+def batch_check_subscription(http_request: Request, response: Response, request: BatchCheckSubscriptionRequest):
     """批量检测账号订阅状态"""
+    require_webui_auth(http_request)
+    session_id, reissued_session_id = ensure_session_id(http_request)
     proxy = request.proxy or get_settings().proxy_url
-
-    results = {"success_count": 0, "failed_count": 0, "details": []}
 
     with get_db() as db:
         ids = resolve_account_ids(
             db, request.ids, request.select_all,
             request.status_filter, request.email_service_filter, request.search_filter
         )
-        for account_id in ids:
-            account = db.query(Account).filter(Account.id == account_id).first()
-            if not account:
-                results["failed_count"] += 1
-                results["details"].append(
-                    {"id": account_id, "email": None, "success": False, "error": "账号不存在"}
-                )
-                continue
+        scope_key = crud.build_batch_subscription_request_key(
+            account_ids=ids,
+            select_all=request.select_all,
+            status_filter=request.status_filter,
+            email_service_filter=request.email_service_filter,
+            search_filter=request.search_filter,
+            proxy=proxy,
+        )
+        task, reused = crud.create_or_reuse_batch_subscription_task(
+            db,
+            owner_key=crud.build_batch_subscription_owner_key(session_id),
+            scope_key=scope_key,
+            total_count=len(ids),
+            proxy=proxy,
+            session_id=session_id,
+            request_payload={
+                "ids": ids,
+                "select_all": request.select_all,
+                "status_filter": request.status_filter,
+                "email_service_filter": request.email_service_filter,
+                "search_filter": request.search_filter,
+                "proxy": proxy,
+                "request_key": scope_key,
+            },
+        )
+        created_task_id = task.id if not reused else None
 
-            try:
-                status = check_subscription_status(account, proxy)
-                account.subscription_type = None if status == "free" else status
-                account.subscription_at = datetime.utcnow() if status != "free" else account.subscription_at
-                db.commit()
-                results["success_count"] += 1
-                results["details"].append(
-                    {"id": account_id, "email": account.email, "success": True, "subscription_type": status}
-                )
-            except Exception as e:
-                results["failed_count"] += 1
-                results["details"].append(
-                    {"id": account_id, "email": account.email, "success": False, "error": str(e)}
-                )
+    if reissued_session_id:
+        response.set_cookie(
+            "session_id",
+            build_session_cookie_value(session_id),
+            httponly=True,
+            samesite="lax",
+        )
 
-    return results
+    if created_task_id is not None:
+        dispatch_batch_subscription_task(
+            created_task_id,
+            check_subscription_status_fn=check_subscription_status,
+        )
+
+    return {
+        "task_id": str(task.id),
+        "status": task.status,
+        "reused": reused,
+        "scope_key": scope_key,
+    }
+
+
+@router.get("/tasks/latest")
+def get_latest_batch_task(http_request: Request, type: str, status: str, scope: Optional[str] = None):
+    owner_key, _ = _get_batch_task_owner_key(http_request)
+    if type != crud.BATCH_SUBSCRIPTION_TASK_TYPE:
+        raise HTTPException(status_code=400, detail="不支持的任务类型")
+    if status != "active":
+        raise HTTPException(status_code=400, detail="不支持的任务状态")
+
+    with get_db() as db:
+        task = crud.get_latest_active_batch_subscription_task(db, owner_key=owner_key, scope_key=scope)
+
+    if task is None:
+        return None
+    return {
+        "task_id": str(task.id),
+        "status": task.status,
+        "scope_key": task.scope_key,
+    }
+
+
+@router.get("/tasks/latest-active")
+def get_latest_active_batch_task(http_request: Request, type: str):
+    owner_key, _ = _get_batch_task_owner_key(http_request)
+    if type != crud.BATCH_SUBSCRIPTION_TASK_TYPE:
+        raise HTTPException(status_code=400, detail="不支持的任务类型")
+
+    with get_db() as db:
+        task = crud.get_latest_active_batch_subscription_task(db, owner_key=owner_key)
+
+    if task is None:
+        return None
+    return {
+        "task_id": str(task.id),
+        "status": task.status,
+        "scope_key": task.scope_key,
+    }
+
+
+@router.get("/tasks/{task_id}")
+def get_batch_task_detail(http_request: Request, task_id: int, log_offset: int = 0):
+    owner_key, _ = _get_batch_task_owner_key(http_request)
+
+    with get_db() as db:
+        task = crud.get_batch_subscription_task_by_id(db, task_id, owner_key=owner_key)
+
+    if task is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return _serialize_batch_subscription_task(task, log_offset=log_offset)
 
 
 @router.post("/accounts/{account_id}/mark-subscription")
@@ -178,5 +276,3 @@ def mark_subscription(account_id: int, request: MarkSubscriptionRequest):
         db.commit()
 
     return {"success": True, "subscription_type": request.subscription_type}
-
-

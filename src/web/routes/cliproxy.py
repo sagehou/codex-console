@@ -1,6 +1,7 @@
 """CLIProxy environment and maintenance run routes."""
 
 import asyncio
+import json
 import time
 from typing import List
 from typing import Any, Dict, Optional
@@ -14,7 +15,8 @@ from ...database.models import MaintenanceActionLog, MaintenanceRun, RemoteAuthI
 from ...database.session import get_db
 from ...core.cliproxy.client import CLIProxyAPIClient
 from ...core.cliproxy.maintenance import CLIProxyMaintenanceEngine
-from ..auth import require_webui_auth
+from ...core.tasks.cliproxy_aggregate import run_cliproxy_aggregate_task
+from ..auth import get_current_session_id, require_webui_auth
 from ..task_manager import task_manager
 
 router = APIRouter()
@@ -57,8 +59,26 @@ class CLIProxyMaintainRequest(BaseModel):
     dry_run: bool = False
 
 
+class CLIProxyAggregateScanRequest(BaseModel):
+    service_ids: List[int]
+
+
+class CLIProxyAggregateMaintainRequest(BaseModel):
+    service_ids: List[int]
+    dry_run: bool = False
+
+
+class CLIProxyTestConnectionRequest(BaseModel):
+    service_ids: List[int]
+
+
 class CLIProxyTokenReplaceRequest(BaseModel):
     token: str
+
+
+CLIPROXY_TEST_CONNECTION_MAX_SERVICES = 10
+CLIPROXY_TEST_CONNECTION_TIMEOUT_SECONDS = 10
+CLIPROXY_TEST_CONNECTION_CONCURRENCY = 4
 
 
 def _run_to_dict(run) -> Dict[str, Any]:
@@ -121,6 +141,53 @@ def _action_log_to_dict(item: MaintenanceActionLog) -> Dict[str, Any]:
     }
 
 
+def _build_cliproxy_history_item(run: MaintenanceRun) -> Dict[str, Any]:
+    summary = run.summary_json or {}
+    result_summary = summary.get("result_summary") or {"records": summary.get("records", 0)}
+    record_count = int(result_summary.get("records", summary.get("records", 0)) or 0)
+    return {
+        "task_id": str(run.id),
+        "type": run.run_type,
+        "status": run.status,
+        "service_total": int(summary.get("service_total") or len(summary.get("services") or [])),
+        "service_completed": int(summary.get("service_completed") or 0),
+        "progress_percent": int(summary.get("progress_percent") or 0),
+        "current_stage": summary.get("current_stage"),
+        "result_summary": {"records": record_count},
+        "counters": {"record_count": record_count},
+        "created_at": run.created_at.isoformat() if run.created_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+    }
+
+
+def _build_cliproxy_service_environment_map(db) -> Dict[int, Dict[str, Any]]:
+    service_map: Dict[int, Dict[str, Any]] = {}
+    for service in crud.get_cliproxy_selectable_cpa_services(db):
+        service_id = int(service["id"])
+        environment = crud.get_cliproxy_environment_for_cpa_service(db, service_id)
+        if environment is None:
+            continue
+        service_map[environment.id] = {
+            "service_id": service_id,
+            "service_name": service["name"],
+        }
+    return service_map
+
+
+def _build_cliproxy_inventory_item(item: RemoteAuthInventory, service_context: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "service_id": service_context["service_id"],
+        "service_name": service_context["service_name"],
+        "remote_file_id": item.remote_file_id,
+        "email": item.email,
+        "remote_account_id": item.remote_account_id,
+        "sync_state": item.sync_state,
+        "probe_status": item.probe_status,
+        "last_seen_at": item.last_seen_at.isoformat() if item.last_seen_at else None,
+        "last_probed_at": item.last_probed_at.isoformat() if item.last_probed_at else None,
+    }
+
+
 def _environment_resource_details(environment_id: int) -> Dict[str, Any]:
     return {"resource": "environment", "resource_id": environment_id}
 
@@ -152,11 +219,124 @@ def _write_webui_audit(
         )
 
 
+def _cliproxy_audit_summary_details(*, service_id: int, service_name: str, status: str, run_type: str) -> Dict[str, Any]:
+    return {
+        "resource": "cliproxy",
+        "resource_type": "cliproxy",
+        "service_id": service_id,
+        "service_name": service_name,
+        "status": status,
+        "run_type": run_type,
+    }
+
+
+def _write_cliproxy_bulk_action_summary_audits(*, event_type: str, run_type: str, services: List[Dict[str, Any]]) -> None:
+    for service in services:
+        _write_webui_audit(
+            event_type=event_type,
+            message=f"queued bulk {run_type} for service {service['service_name']}",
+            details_json=_cliproxy_audit_summary_details(
+                service_id=int(service["service_id"]),
+                service_name=str(service["service_name"]),
+                status=str(service.get("status") or "queued"),
+                run_type=run_type,
+            ),
+        )
+
+
 def _request_payload_for_idempotency(run_type: str, request: BaseModel) -> Dict[str, Any]:
     payload = request.model_dump(exclude_none=True)
     if run_type == "scan":
         return payload
     return payload
+
+
+def _serialize_cliproxy_task(run: MaintenanceRun) -> Dict[str, Any]:
+    if crud.is_cliproxy_aggregate_task(run):
+        return crud.serialize_cliproxy_aggregate_task(run)
+    return _run_to_dict(run)
+
+
+def _raise_cliproxy_aggregate_conflict(exc: ValueError) -> None:
+    try:
+        detail = json.loads(str(exc))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    raise HTTPException(status_code=409, detail=detail) from exc
+
+
+def _build_aggregate_service_payloads(db, service_ids: List[int]) -> List[Dict[str, Any]]:
+    services = []
+    for service_id in crud.normalize_cliproxy_service_ids(service_ids):
+        service = _get_ready_cpa_service_or_raise(db, service_id)
+        services.append(
+            {
+                "service_id": service.id,
+                "service_name": service.name,
+                "status": "queued",
+                "known_record_total": None,
+                "processed_count": 0,
+                "success_count": 0,
+                "failure_count": 0,
+                "current_stage": "queued",
+                "last_error": None,
+            }
+        )
+    return services
+
+
+def _get_current_session_id_or_raise(request: Request) -> str:
+    session_id = get_current_session_id(request)
+    if not session_id:
+        raise HTTPException(status_code=401, detail="Session not established")
+    return session_id
+
+
+def _get_owned_cliproxy_task_or_404(request: Request, task_id: int) -> MaintenanceRun:
+    session_id = _get_current_session_id_or_raise(request)
+    with get_db() as db:
+        run = crud.get_cliproxy_aggregate_task_by_id(db, task_id, owner_session_id=session_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="CLIProxy aggregate task not found")
+        return run
+
+
+def _cliproxy_cpa_validation_error(service) -> HTTPException:
+    missing_fields = crud.get_cpa_service_missing_required_fields(service)
+    return HTTPException(
+        status_code=422,
+        detail={
+            "code": "cpa_service_config_incomplete",
+            "service_id": service.id,
+            "service_name": service.name,
+            "message": "CPA service config incomplete",
+            "missing_required_fields": missing_fields,
+        },
+    )
+
+
+def _get_ready_cpa_service_or_raise(db, service_id: int):
+    service = crud.get_cpa_service_by_id(db, service_id)
+    if service is None or not service.enabled:
+        raise HTTPException(status_code=404, detail="CPA service not found")
+
+    missing_fields = crud.get_cpa_service_missing_required_fields(service)
+    if missing_fields:
+        raise _cliproxy_cpa_validation_error(service)
+    return service
+
+
+def _create_or_replay_cpa_service_run(service_id: int, run_type: str, request_data: Dict[str, Any]):
+    with get_db() as db:
+        service = _get_ready_cpa_service_or_raise(db, service_id)
+        environment = crud.ensure_cliproxy_environment_for_cpa_service(db, service)
+        run, created = crud.create_maintenance_run_if_available(
+            db,
+            run_type=run_type,
+            environment_id=environment.id,
+            request_data=request_data,
+        )
+        return run, created, environment.id
 
 
 def _run_maintenance_job(run_id: int) -> None:
@@ -179,6 +359,11 @@ async def _dispatch_maintenance_job(run_id: int) -> None:
     await loop.run_in_executor(task_manager.executor, _run_maintenance_job, run_id)
 
 
+async def _dispatch_cliproxy_aggregate_job(run_id: int) -> None:
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(task_manager.executor, run_cliproxy_aggregate_task, run_id)
+
+
 def _create_or_replay_run(environment_id: int, run_type: str, request_data: Dict[str, Any]):
     with get_db() as db:
         run, created = crud.create_maintenance_run_if_available(
@@ -197,11 +382,81 @@ def _create_or_replay_run(environment_id: int, run_type: str, request_data: Dict
         return run, False
 
 
+def _test_cliproxy_connection(base_url: str, token: str, *, timeout: int) -> Dict[str, Any]:
+    status = "ok"
+    error = None
+    started = time.perf_counter()
+    try:
+        client = CLIProxyAPIClient(base_url=base_url, token=token, timeout=timeout)
+        client.fetch_inventory()
+    except Exception as exc:
+        status = "error"
+        error = str(exc) or exc.__class__.__name__
+    latency_ms = max(0, int((time.perf_counter() - started) * 1000))
+    return {"status": status, "latency_ms": latency_ms, "error": error}
+
+
+async def _test_cliproxy_service_connection(service: Dict[str, Any], semaphore: asyncio.Semaphore) -> Dict[str, Any]:
+    async with semaphore:
+        try:
+            result = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _test_cliproxy_connection,
+                    service["api_url"],
+                    service["api_token"],
+                    timeout=CLIPROXY_TEST_CONNECTION_TIMEOUT_SECONDS,
+                ),
+                timeout=CLIPROXY_TEST_CONNECTION_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            result = {"status": "error", "latency_ms": None, "error": "Connection test timed out"}
+
+    return {
+        "service_id": service["service_id"],
+        "service_name": service["service_name"],
+        "status": result["status"],
+        "latency_ms": result["latency_ms"],
+        "error": result["error"],
+    }
+
+
 @router.get("")
 async def list_cliproxy_environments(request: Request, enabled: Optional[bool] = None):
     require_webui_auth(request)
     with get_db() as db:
         return [environment.to_detail_dict() for environment in crud.get_cliproxy_environments(db, enabled=enabled)]
+
+
+@router.get("/cpa-services")
+async def list_cliproxy_cpa_services(request: Request):
+    require_webui_auth(request)
+    with get_db() as db:
+        return crud.get_cliproxy_selectable_cpa_services(db)
+
+
+@router.post("/test-connection")
+async def test_cliproxy_connections(http_request: Request, request: CLIProxyTestConnectionRequest):
+    require_webui_auth(http_request)
+    service_ids = crud.normalize_cliproxy_service_ids(request.service_ids)
+    if len(service_ids) > CLIPROXY_TEST_CONNECTION_MAX_SERVICES:
+        raise HTTPException(status_code=422, detail="Select at most 10 CPA services")
+
+    with get_db() as db:
+        services = []
+        for service_id in service_ids:
+            service = _get_ready_cpa_service_or_raise(db, service_id)
+            services.append(
+                {
+                    "service_id": service.id,
+                    "service_name": service.name,
+                    "api_url": service.api_url,
+                    "api_token": service.api_token,
+                }
+            )
+
+    semaphore = asyncio.Semaphore(CLIPROXY_TEST_CONNECTION_CONCURRENCY)
+    results = await asyncio.gather(*[_test_cliproxy_service_connection(service, semaphore) for service in services])
+    return {"results": results}
 
 
 @router.post("")
@@ -236,6 +491,34 @@ async def create_cliproxy_environment(http_request: Request, request: CLIProxyEn
             details_json=_environment_resource_details(environment.id),
         )
         return environment.to_detail_dict()
+
+
+@router.get("/tasks/history")
+async def list_cliproxy_task_history(request: Request):
+    require_webui_auth(request)
+    session_id = _get_current_session_id_or_raise(request)
+    with get_db() as db:
+        runs = crud.get_maintenance_runs(db)
+        return [
+            _build_cliproxy_history_item(run)
+            for run in runs
+            if crud.is_cliproxy_aggregate_task(run)
+            and crud.get_cliproxy_aggregate_task_owner_session_id(run) == session_id
+        ]
+
+
+@router.get("/inventory")
+async def list_cliproxy_inventory_summary(request: Request):
+    require_webui_auth(request)
+    with get_db() as db:
+        service_map = _build_cliproxy_service_environment_map(db)
+        rows = []
+        for item in crud.get_remote_auth_inventory(db):
+            service_context = service_map.get(item.environment_id)
+            if service_context is None:
+                continue
+            rows.append(_build_cliproxy_inventory_item(item, service_context))
+        return rows
 
 
 @router.get("/{environment_id}")
@@ -355,6 +638,32 @@ async def start_cliproxy_scan(
     return _run_to_dict(run)
 
 
+@router.post("/cpa-services/{service_id}/scan")
+async def start_cliproxy_scan_for_cpa_service(
+    http_request: Request,
+    service_id: int,
+    request: CLIProxyScanRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+):
+    require_webui_auth(http_request)
+    request_data = _request_payload_for_idempotency("scan", request)
+    run, created, environment_id = _create_or_replay_cpa_service_run(service_id, "scan", request_data)
+    if created:
+        _write_webui_audit(
+            event_type="run_create",
+            environment_id=environment_id,
+            run_id=run.id,
+            message="created scan run",
+            details_json=_run_resource_details(run.id, environment_id, "scan"),
+        )
+        background_tasks.add_task(_dispatch_maintenance_job, run.id)
+        response.status_code = 202
+    else:
+        response.status_code = 200
+    return _run_to_dict(run)
+
+
 @router.post("/{environment_id}/maintain")
 async def start_cliproxy_maintain(
     http_request: Request,
@@ -379,6 +688,154 @@ async def start_cliproxy_maintain(
     else:
         response.status_code = 200
     return _run_to_dict(run)
+
+
+@router.post("/cpa-services/{service_id}/maintain")
+async def start_cliproxy_maintain_for_cpa_service(
+    http_request: Request,
+    service_id: int,
+    request: CLIProxyMaintainRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+):
+    require_webui_auth(http_request)
+    request_data = _request_payload_for_idempotency("maintain", request)
+    run, created, environment_id = _create_or_replay_cpa_service_run(service_id, "maintain", request_data)
+    if created:
+        _write_webui_audit(
+            event_type="run_create",
+            environment_id=environment_id,
+            run_id=run.id,
+            message="created maintain run",
+            details_json={**_run_resource_details(run.id, environment_id, "maintain"), "dry_run": request.dry_run},
+        )
+        background_tasks.add_task(_dispatch_maintenance_job, run.id)
+        response.status_code = 202
+    else:
+        response.status_code = 200
+    return _run_to_dict(run)
+
+
+@router.post("/scan")
+async def start_cliproxy_aggregate_scan(
+    http_request: Request,
+    request: CLIProxyAggregateScanRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+):
+    require_webui_auth(http_request)
+    session_id = _get_current_session_id_or_raise(http_request)
+    with get_db() as db:
+        services = _build_aggregate_service_payloads(db, request.service_ids)
+        try:
+            run, created = crud.create_or_reuse_cliproxy_aggregate_task(
+                db,
+                owner_session_id=session_id,
+                run_type="scan",
+                service_ids=request.service_ids,
+                services=services,
+                request_data=request.model_dump(exclude_none=True),
+            )
+        except ValueError as exc:
+            _raise_cliproxy_aggregate_conflict(exc)
+        if created:
+            _write_cliproxy_bulk_action_summary_audits(
+                event_type="cliproxy_bulk_scan_requested",
+                run_type="scan",
+                services=services,
+            )
+            background_tasks.add_task(_dispatch_cliproxy_aggregate_job, run.id)
+        response.status_code = 202 if created else 200
+        return crud.serialize_cliproxy_aggregate_task(run)
+    
+    
+
+@router.get("/tasks/latest")
+async def get_latest_cliproxy_aggregate_task_for_scope(request: Request, type: str, services: str):
+    require_webui_auth(request)
+    session_id = _get_current_session_id_or_raise(request)
+    service_ids = [int(item) for item in services.split(",") if str(item).strip()]
+    aggregate_scope_key = crud.build_cliproxy_aggregate_scope_key(run_type=type, service_ids=service_ids)
+    with get_db() as db:
+        run = crud.get_latest_active_cliproxy_aggregate_task(
+            db,
+            owner_session_id=session_id,
+            run_type=type,
+            aggregate_scope_key=aggregate_scope_key,
+        )
+        if run is None:
+            raise HTTPException(status_code=404, detail="CLIProxy aggregate task not found")
+        return crud.serialize_cliproxy_aggregate_task(run)
+
+
+@router.post("/maintain")
+async def start_cliproxy_aggregate_maintain(
+    http_request: Request,
+    request: CLIProxyAggregateMaintainRequest,
+    background_tasks: BackgroundTasks,
+    response: Response,
+):
+    require_webui_auth(http_request)
+    session_id = _get_current_session_id_or_raise(http_request)
+    with get_db() as db:
+        services = _build_aggregate_service_payloads(db, request.service_ids)
+        try:
+            run, created = crud.create_or_reuse_cliproxy_aggregate_task(
+                db,
+                owner_session_id=session_id,
+                run_type="maintain",
+                service_ids=request.service_ids,
+                services=services,
+                request_data=request.model_dump(exclude_none=True),
+            )
+        except ValueError as exc:
+            _raise_cliproxy_aggregate_conflict(exc)
+        if created:
+            _write_cliproxy_bulk_action_summary_audits(
+                event_type="cliproxy_bulk_maintain_requested",
+                run_type="maintain",
+                services=services,
+            )
+            background_tasks.add_task(_dispatch_cliproxy_aggregate_job, run.id)
+        response.status_code = 202 if created else 200
+        return crud.serialize_cliproxy_aggregate_task(run)
+
+
+@router.get("/tasks/latest-active")
+async def get_latest_cliproxy_aggregate_task(request: Request):
+    require_webui_auth(request)
+    session_id = _get_current_session_id_or_raise(request)
+    with get_db() as db:
+        run = crud.get_latest_active_cliproxy_aggregate_task(db, owner_session_id=session_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="CLIProxy aggregate task not found")
+        return crud.serialize_cliproxy_aggregate_task(run)
+
+
+@router.get("/tasks/{task_id}")
+async def get_cliproxy_aggregate_task_detail(request: Request, task_id: int):
+    require_webui_auth(request)
+    run = _get_owned_cliproxy_task_or_404(request, task_id)
+    return _serialize_cliproxy_task(run)
+
+
+@router.post("/cpa-services/{service_id}/test-connection")
+async def test_cliproxy_connection_for_cpa_service(http_request: Request, service_id: int):
+    require_webui_auth(http_request)
+    with get_db() as db:
+        service = _get_ready_cpa_service_or_raise(db, service_id)
+
+    status = "ok"
+    error = None
+    started = time.perf_counter()
+    try:
+        client = CLIProxyAPIClient(base_url=service.api_url, token=service.api_token)
+        client.fetch_inventory()
+    except Exception as exc:
+        status = "error"
+        error = str(exc) or exc.__class__.__name__
+    latency_ms = max(0, int((time.perf_counter() - started) * 1000))
+    return {"status": status, "latency_ms": latency_ms, "error": error}
 
 
 @router.post("/{environment_id}/refill")

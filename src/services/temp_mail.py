@@ -21,12 +21,15 @@ from .base import BaseEmailService, EmailServiceError, EmailServiceType
 from ..core.http_client import HTTPClient, RequestConfig
 from ..core.utils import calculate_sha256
 from ..config.constants import OTP_CODE_PATTERN, OTP_CODE_SEMANTIC_PATTERN
+from ..database.models import normalize_temp_mail_config
 
 
 logger = logging.getLogger(__name__)
 
 UNKNOWN_TIME_ACCEPTANCE_DELAY_SECONDS = 6
 MILLISECOND_EPOCH_THRESHOLD = 10_000_000_000
+TEMP_MAIL_GLOBAL_ERROR_STATUS_CODES = {401, 403}
+TEMP_MAIL_DOMAIN_FAILOVER_STATUS_CODES = {404, 409, 429, 502, 503, 504}
 
 TEMP_MAIL_CONTEXTUAL_OTP_PATTERNS = [
     re.compile(OTP_CODE_SEMANTIC_PATTERN, re.IGNORECASE),
@@ -59,8 +62,10 @@ class TempMailService(BaseEmailService):
         """
         super().__init__(EmailServiceType.TEMP_MAIL, name)
 
-        required_keys = ["base_url", "admin_password", "domain"]
-        missing_keys = [key for key in required_keys if not (config or {}).get(key)]
+        normalized_config = normalize_temp_mail_config(config or {})
+
+        required_keys = ["base_url", "admin_password", "domains"]
+        missing_keys = [key for key in required_keys if not normalized_config.get(key)]
         if missing_keys:
             raise ValueError(f"缺少必需配置: {missing_keys}")
 
@@ -69,7 +74,7 @@ class TempMailService(BaseEmailService):
             "timeout": 30,
             "max_retries": 3,
         }
-        self.config = {**default_config, **(config or {})}
+        self.config = {**default_config, **normalized_config}
 
         # 不走代理，proxy_url=None
         http_config = RequestConfig(
@@ -318,13 +323,22 @@ class TempMailService(BaseEmailService):
         base_url = self.config["base_url"].rstrip("/")
         url = f"{base_url}{path}"
 
+        disable_retries = kwargs.pop("disable_retries", False)
+
         # 合并默认 headers
         kwargs.setdefault("headers", {})
         for k, v in self._default_headers().items():
             kwargs["headers"].setdefault(k, v)
 
         try:
-            response = self.http_client.request(method, url, **kwargs)
+            if disable_retries and hasattr(self.http_client, "session") and hasattr(self.http_client, "config"):
+                kwargs.setdefault("timeout", self.http_client.config.timeout)
+                kwargs.setdefault("allow_redirects", self.http_client.config.follow_redirects)
+                if self.http_client.proxies and "proxies" not in kwargs:
+                    kwargs["proxies"] = self.http_client.proxies
+                response = self.http_client.session.request(method, url, **kwargs)
+            else:
+                response = self.http_client.request(method, url, **kwargs)
 
             if response.status_code >= 400:
                 error_msg = f"请求失败: {response.status_code}"
@@ -348,6 +362,23 @@ class TempMailService(BaseEmailService):
                 raise
             raise EmailServiceError(f"请求失败: {method} {path} - {e}")
 
+    def _is_global_domain_failover_error(self, error: Exception) -> bool:
+        if isinstance(error, ValueError):
+            return True
+        if isinstance(error, EmailServiceError):
+            if error.status_code in TEMP_MAIL_GLOBAL_ERROR_STATUS_CODES:
+                return True
+            if error.status_code in TEMP_MAIL_DOMAIN_FAILOVER_STATUS_CODES:
+                return False
+            return True
+        return False
+
+    def _format_domain_failure_summary(self, domain: str, error: Exception) -> str:
+        status_code = getattr(error, "status_code", None)
+        if status_code is not None:
+            return f"{domain} -> {status_code}: {error}"
+        return f"{domain} -> {error}"
+
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         """
         通过 admin API 创建临时邮箱
@@ -368,50 +399,60 @@ class TempMailService(BaseEmailService):
         suffix = ''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
         name = letters + digits + suffix
 
-        domain = self.config["domain"]
         enable_prefix = self.config.get("enable_prefix", True)
+        domain_attempts: List[str] = []
 
-        body = {
-            "name": name,
-            "domain": domain,
-        }
-
-        try:
-            response = self._make_request(
-                "POST",
-                "/admin/new_address",
-                json=body,
-                headers=self._admin_headers(),
-            )
-
-            address = response.get("address", "").strip()
-            jwt = response.get("jwt", "").strip()
-            password = response.get("password", "").strip()
-
-            if not address:
-                raise EmailServiceError(f"API 返回数据不完整: {response}")
-
-            email_info = {
-                "email": address,
-                "jwt": jwt,
-                "password": password,
-                "service_id": address,
-                "id": address,
-                "created_at": time.time(),
+        for domain in self.config["domains"]:
+            body = {
+                "name": name,
+                "domain": domain,
             }
 
-            # 缓存 jwt，供获取验证码时使用
-            self._email_cache[address] = email_info
+            try:
+                response = self._make_request(
+                    "POST",
+                    "/admin/new_address",
+                    json=body,
+                    headers=self._admin_headers(),
+                    disable_retries=True,
+                )
 
-            logger.info(f"成功创建 TempMail 邮箱: {address}")
-            self.update_status(True)
-            return email_info
+                address = response.get("address", "").strip()
+                jwt = response.get("jwt", "").strip()
+                password = response.get("password", "").strip()
 
-        except Exception as e:
-            self.update_status(False, e)
-            if isinstance(e, EmailServiceError):
-                raise
-            raise EmailServiceError(f"创建邮箱失败: {e}")
+                if not address:
+                    raise EmailServiceError(f"API 返回数据不完整: {response}")
+
+                email_info = {
+                    "email": address,
+                    "jwt": jwt,
+                    "password": password,
+                    "service_id": address,
+                    "id": address,
+                    "created_at": time.time(),
+                }
+
+                # 缓存 jwt，供获取验证码时使用
+                self._email_cache[address] = email_info
+
+                logger.info(f"成功创建 TempMail 邮箱: {address}")
+                self.update_status(True)
+                return email_info
+
+            except Exception as e:
+                self.update_status(False, e)
+                if self._is_global_domain_failover_error(e):
+                    if isinstance(e, EmailServiceError):
+                        raise
+                    raise EmailServiceError(f"创建邮箱失败: {e}")
+                domain_attempts.append(self._format_domain_failure_summary(domain, e))
+                logger.warning("TempMail 域名尝试失败: %s", domain_attempts[-1])
+
+        attempt_log = "; ".join(domain_attempts)
+        raise EmailServiceError(
+            f"TempMail all domains exhausted after one-pass failover: {attempt_log}"
+        )
 
     def get_verification_code(
         self,

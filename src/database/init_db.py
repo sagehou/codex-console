@@ -2,13 +2,16 @@
 数据库初始化和初始化数据
 """
 
+import hashlib
+import json
+
 from contextlib import contextmanager
 
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import NoSuchTableError
 
 from .session import init_database
-from .models import Base
+from .models import Base, normalize_temp_mail_config
 
 
 @contextmanager
@@ -82,6 +85,32 @@ def _backfill_cliproxy_environment_scope_columns(db_manager):
         db.commit()
 
 
+def _backfill_maintenance_run_aggregate_columns(db_manager):
+    """为旧数据库补充 CLIProxy 聚合任务字段。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        columns = inspector.get_columns("maintenance_runs")
+    except NoSuchTableError:
+        return
+
+    column_names = {column["name"] for column in columns}
+    statements = []
+    if "owner_session_id" not in column_names:
+        statements.append("ALTER TABLE maintenance_runs ADD COLUMN owner_session_id VARCHAR(255)")
+    if "aggregate_scope_key" not in column_names:
+        statements.append("ALTER TABLE maintenance_runs ADD COLUMN aggregate_scope_key VARCHAR(255)")
+    if "aggregate_kind" not in column_names:
+        statements.append("ALTER TABLE maintenance_runs ADD COLUMN aggregate_kind VARCHAR(32)")
+
+    if not statements:
+        return
+
+    with _get_managed_db_session(db_manager) as db:
+        for statement in statements:
+            db.execute(text(statement))
+        db.commit()
+
+
 def _backfill_account_traceability_columns(db_manager):
     """为旧数据库补充 accounts 追踪字段。"""
     try:
@@ -106,6 +135,172 @@ def _backfill_account_traceability_columns(db_manager):
         db.commit()
 
 
+def _backfill_batch_subscription_task_columns(db_manager):
+    """确保批量订阅任务表存在最小字段集。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        columns = inspector.get_columns("batch_subscription_tasks")
+    except NoSuchTableError:
+        return
+
+    column_names = {column["name"] for column in columns}
+    statements = []
+    if "owner_key" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN owner_key VARCHAR(255) NOT NULL DEFAULT 'anonymous'")
+    if "session_id" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN session_id VARCHAR(255)")
+    if "scope_key" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN scope_key VARCHAR(64) NOT NULL DEFAULT ''")
+    if "active_scope_key" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN active_scope_key VARCHAR(64)")
+    if "status" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'queued'")
+    if "total_count" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN total_count INTEGER NOT NULL DEFAULT 0")
+    if "processed_count" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN processed_count INTEGER NOT NULL DEFAULT 0")
+    if "success_count" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN success_count INTEGER NOT NULL DEFAULT 0")
+    if "failure_count" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN failure_count INTEGER NOT NULL DEFAULT 0")
+    if "current_account" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN current_account VARCHAR(255)")
+    if "request_payload" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN request_payload TEXT")
+    if "recent_logs" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN recent_logs TEXT")
+    if "proxy" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN proxy VARCHAR(255)")
+    if "started_at" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN started_at DATETIME")
+    if "completed_at" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN completed_at DATETIME")
+    if "updated_at" not in column_names:
+        statements.append("ALTER TABLE batch_subscription_tasks ADD COLUMN updated_at DATETIME")
+
+    with _get_managed_db_session(db_manager) as db:
+        for statement in statements:
+            db.execute(text(statement))
+        legacy_rows = db.execute(
+            text(
+                "SELECT id, owner_key, scope_key, active_scope_key, status, request_payload, proxy "
+                "FROM batch_subscription_tasks ORDER BY id"
+            )
+        ).fetchall()
+        active_statuses = {"queued", "running"}
+        terminal_statuses = {"completed", "failed", "cancelled", "interrupted"}
+        reservation_counts = {}
+
+        for row in legacy_rows:
+            scope_key = (row.scope_key or "").strip()
+            request_payload = None
+            if row.request_payload:
+                try:
+                    request_payload = json.loads(row.request_payload)
+                except (TypeError, json.JSONDecodeError):
+                    request_payload = None
+
+            if not scope_key:
+                if isinstance(request_payload, dict):
+                    ids = request_payload.get("ids") or []
+                    normalized_ids = sorted({int(account_id) for account_id in ids}) if isinstance(ids, list) else []
+                    normalized_scope = {
+                        "kind": "filter_snapshot" if request_payload.get("select_all") else "account_ids",
+                        "account_ids": normalized_ids,
+                        "status_filter": request_payload.get("status_filter") or "",
+                        "email_service_filter": request_payload.get("email_service_filter") or "",
+                        "search_filter": request_payload.get("search_filter") or "",
+                        "proxy": request_payload.get("proxy") or row.proxy or "",
+                    }
+                    serialized = json.dumps(normalized_scope, sort_keys=True, separators=(",", ":"))
+                    scope_key = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+                else:
+                    scope_key = hashlib.sha256(f"legacy:{row.owner_key}:{row.id}".encode("utf-8")).hexdigest()
+
+                db.execute(
+                    text("UPDATE batch_subscription_tasks SET scope_key = :scope_key WHERE id = :task_id"),
+                    {"scope_key": scope_key, "task_id": row.id},
+                )
+
+            if row.status in active_statuses:
+                reservation = scope_key
+                reservation_key = (row.owner_key, reservation)
+                reservation_counts[reservation_key] = reservation_counts.get(reservation_key, 0) + 1
+                if reservation_counts[reservation_key] > 1:
+                    reservation = hashlib.sha256(f"{reservation}:legacy:{row.id}".encode("utf-8")).hexdigest()
+                db.execute(
+                    text("UPDATE batch_subscription_tasks SET active_scope_key = :active_scope_key WHERE id = :task_id"),
+                    {"active_scope_key": reservation, "task_id": row.id},
+                )
+            elif row.status in terminal_statuses:
+                db.execute(
+                    text("UPDATE batch_subscription_tasks SET active_scope_key = NULL WHERE id = :task_id"),
+                    {"task_id": row.id},
+                )
+        db.execute(
+            text(
+                "UPDATE batch_subscription_tasks "
+                "SET active_scope_key = scope_key "
+                "WHERE status IN ('queued', 'running') "
+                "AND (active_scope_key IS NULL OR active_scope_key = '')"
+            )
+        )
+        db.execute(
+            text(
+                "UPDATE batch_subscription_tasks "
+                "SET active_scope_key = NULL "
+                "WHERE status IN ('completed', 'failed', 'cancelled', 'interrupted')"
+            )
+        )
+        db.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_batch_subscription_tasks_owner_active_scope "
+                "ON batch_subscription_tasks (owner_key, active_scope_key)"
+            )
+        )
+        db.commit()
+
+
+def _backfill_temp_mail_domains(db_manager):
+    """将旧 TempMail 单域名配置懒升级为 canonical domains 形态。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        inspector.get_columns("email_services")
+    except NoSuchTableError:
+        return
+
+    with _get_managed_db_session(db_manager) as db:
+        rows = db.execute(
+            text(
+                "SELECT id, config FROM email_services WHERE service_type = 'temp_mail' ORDER BY id"
+            )
+        ).fetchall()
+
+        for row in rows:
+            if not row.config:
+                continue
+            try:
+                config = json.loads(row.config)
+            except (TypeError, json.JSONDecodeError):
+                continue
+
+            try:
+                normalized = normalize_temp_mail_config(config)
+            except ValueError:
+                continue
+
+            if normalized != config:
+                db.execute(
+                    text("UPDATE email_services SET config = :config WHERE id = :service_id"),
+                    {
+                        "config": json.dumps(normalized, ensure_ascii=False),
+                        "service_id": row.id,
+                    },
+                )
+
+        db.commit()
+
+
 def initialize_database(database_url: str = None):
     """
     初始化数据库
@@ -120,7 +315,10 @@ def initialize_database(database_url: str = None):
     # 兼容旧库结构
     _backfill_sub2api_service_target_type(db_manager)
     _backfill_cliproxy_environment_scope_columns(db_manager)
+    _backfill_maintenance_run_aggregate_columns(db_manager)
     _backfill_account_traceability_columns(db_manager)
+    _backfill_batch_subscription_task_columns(db_manager)
+    _backfill_temp_mail_domains(db_manager)
 
     # 初始化默认设置（从 settings 模块导入以避免循环导入）
     from ..config.settings import init_default_settings

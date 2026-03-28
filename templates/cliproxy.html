@@ -148,6 +148,148 @@
             border-radius: 14px;
             background: var(--surface);
         }
+        .cliproxy-empty-state {
+            margin-top: 16px;
+        }
+        .cliproxy-service-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .cliproxy-service-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 16px;
+        }
+        .cliproxy-service-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: var(--surface);
+            padding: 14px 16px;
+        }
+        .cliproxy-service-card.is-incomplete {
+            border-color: color-mix(in srgb, var(--warning, #d97706) 58%, var(--border) 42%);
+        }
+        .cliproxy-service-card-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 8px;
+        }
+        .cliproxy-service-name {
+            margin: 0;
+        }
+        .cliproxy-config-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 999px;
+            font-size: 0.76rem;
+            background: color-mix(in srgb, var(--warning, #d97706) 14%, var(--surface) 86%);
+            color: var(--warning, #d97706);
+        }
+        .cliproxy-active-task-banner {
+            margin-top: 16px;
+            padding: 14px 16px;
+            border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border) 72%);
+            border-radius: 14px;
+            background: color-mix(in srgb, var(--primary) 8%, var(--surface) 92%);
+        }
+        .cliproxy-cpa-workbench {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            margin-top: 16px;
+        }
+        .cliproxy-selection-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .cliproxy-select-card {
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            background: var(--surface);
+            padding: 14px 16px;
+            cursor: pointer;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+        }
+        .cliproxy-select-card:hover,
+        .cliproxy-select-card.is-selected {
+            border-color: var(--primary);
+            box-shadow: 0 12px 28px rgba(37, 99, 235, 0.12);
+            transform: translateY(-1px);
+        }
+        .cliproxy-select-card.is-disabled {
+            cursor: not-allowed;
+            opacity: 0.72;
+        }
+        .cliproxy-select-card input {
+            margin-right: 8px;
+        }
+        .cliproxy-selection-header,
+        .cliproxy-progress-summary {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .cliproxy-bulk-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 14px;
+        }
+        .cliproxy-progress-track,
+        .cliproxy-child-progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--surface-hover) 78%, var(--background) 22%);
+            overflow: hidden;
+        }
+        .cliproxy-progress-bar,
+        .cliproxy-child-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, var(--primary), color-mix(in srgb, var(--primary) 68%, #22c55e 32%));
+            transition: width 0.2s ease;
+        }
+        .cliproxy-service-progress-list,
+        .cliproxy-grouped-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            margin-top: 14px;
+        }
+        .cliproxy-child-card,
+        .cliproxy-grouped-card {
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            background: var(--surface);
+            padding: 14px 16px;
+        }
+        .cliproxy-child-meta,
+        .cliproxy-grouped-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .cliproxy-log-lines {
+            margin: 10px 0 0;
+            padding-left: 18px;
+        }
+        .cliproxy-log-lines li {
+            color: var(--text-secondary);
+            margin-bottom: 4px;
+        }
         .cliproxy-code {
             font-family: var(--font-mono);
             font-size: 0.8rem;
@@ -189,11 +331,218 @@
             </button>
         </nav>
 
-        <main class="main-content">
+        <main id="cliproxy-page" class="main-content" data-page="cliproxy">
             <div class="page-header">
                 <h2>CLIProxyAPI 管理台</h2>
                 <p class="subtitle">集中维护环境配置、连接检测、扫描/维护动作，以及远端运行记录和库存快照。</p>
             </div>
+
+            {% set latest_task = cliproxy_latest_active_task %}
+            {% set latest_task_services = latest_task.services if latest_task else [] %}
+            {% set recovered_selection_count = latest_task_services | length %}
+            <section
+                id="cliproxy-active-task-banner"
+                class="cliproxy-active-task-banner{% if not latest_task %} hidden{% endif %}"
+                {% if latest_task %}
+                data-latest-active-task-id="{{ latest_task.task_id }}"
+                data-latest-active-task-status="{{ latest_task.status }}"
+                data-latest-active-task-type="{{ latest_task.run_type }}"
+                {% endif %}
+            >
+                <strong>活动任务恢复</strong>
+                <p id="cliproxy-active-task-banner-message" class="cliproxy-muted">
+                    {% if latest_task %}
+                    已恢复最近的 CLIProxy {{ latest_task.run_type }} 任务，当前状态：{{ latest_task.status }}。
+                    {% else %}
+                    当前没有需要恢复的 CLIProxy 活动任务。
+                    {% endif %}
+                </p>
+            </section>
+
+            <script id="cliproxy-latest-active-task-bootstrap" type="application/json">{{ cliproxy_latest_active_task | tojson if cliproxy_latest_active_task else 'null' }}</script>
+
+            <section id="cliproxy-service-selection-region" class="card cliproxy-cpa-workbench" data-selection-mode="multi">
+                <div class="card-header cliproxy-selection-header">
+                    <div>
+                        <h3 class="cliproxy-section-title">CPA 服务选择</h3>
+                        <p class="cliproxy-muted">直接从已配置的 CPA 服务中多选目标，并对选中的服务执行连接测试、扫描或维护。</p>
+                    </div>
+                    <span class="cliproxy-chip"><strong>已选择</strong><span id="cliproxy-selection-count">{{ recovered_selection_count }}</span></span>
+                </div>
+                <div id="cliproxy-selection-empty" class="cliproxy-empty{% if cliproxy_has_cpa_services %} hidden{% endif %}">当前没有可选择的 CPA 服务。</div>
+                <div id="cliproxy-selection-list" class="cliproxy-selection-grid{% if not cliproxy_has_cpa_services %} hidden{% endif %}">
+                    {% for service in cliproxy_cpa_services %}
+                    {% set is_selected = service.id in (latest_task_services | map(attribute='service_id') | list) %}
+                    <label
+                        class="cliproxy-select-card{% if is_selected %} is-selected{% endif %}{% if service.config_status != 'ready' %} is-disabled{% endif %}"
+                        data-service-id="{{ service.id }}"
+                        data-service-name="{{ service.name }}"
+                        data-service-select="true"
+                        data-selected="{{ 'true' if is_selected else 'false' }}"
+                        data-config-status="{{ service.config_status }}"
+                    >
+                        <div class="cliproxy-service-card-header">
+                            <div>
+                                <input
+                                    type="checkbox"
+                                    class="cliproxy-service-checkbox"
+                                    value="{{ service.id }}"
+                                    {% if is_selected %}checked{% endif %}
+                                    {% if service.config_status != 'ready' %}disabled{% endif %}
+                                >
+                                <strong>{{ service.name }}</strong>
+                            </div>
+                            {% if service.config_status == 'ready' %}
+                            <span class="cliproxy-chip">ready</span>
+                            {% else %}
+                            <span class="cliproxy-config-label">config incomplete</span>
+                            {% endif %}
+                        </div>
+                        <p class="cliproxy-muted">
+                            {% if service.missing_required_fields %}
+                            缺少必填配置：{{ service.missing_required_fields | join(', ') }}
+                            {% else %}
+                            已启用，可参与聚合任务与连接测试。
+                            {% endif %}
+                        </p>
+                    </label>
+                    {% endfor %}
+                </div>
+            </section>
+
+            <section id="cliproxy-action-region" class="card">
+                <div class="card-header">
+                    <div>
+                        <h3 class="cliproxy-section-title">聚合动作</h3>
+                        <p id="cliproxy-bulk-action-summary" class="cliproxy-muted">{% if recovered_selection_count %}已选择 {{ recovered_selection_count }} 个 CPA 服务，可执行聚合动作。{% else %}先选择一个或多个配置完整的 CPA 服务，再执行 test connection / scan / maintain。{% endif %}</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="cliproxy-bulk-actions">
+                        <button type="button" class="btn btn-secondary" id="cliproxy-bulk-test-connection-btn" disabled>测试连接</button>
+                        <button type="button" class="btn btn-info" id="cliproxy-bulk-scan-btn" disabled>启动扫描</button>
+                        <button type="button" class="btn btn-warning" id="cliproxy-bulk-maintain-btn" disabled>执行维护</button>
+                    </div>
+                    <div id="cliproxy-bulk-test-results" class="cliproxy-grouped-list hidden"></div>
+                </div>
+            </section>
+
+            {% set latest_task_payload = cliproxy_latest_active_task %}
+            <section
+                id="cliproxy-aggregate-progress-region"
+                class="card{% if not latest_task_payload %} hidden{% endif %}"
+                data-task-poll-interval-ms="{{ cliproxy_task_poll_interval_ms }}"
+                {% if latest_task_payload %}
+                data-task-id="{{ latest_task_payload.task_id }}"
+                data-run-type="{{ latest_task_payload.run_type }}"
+                {% endif %}
+            >
+                <div class="card-header cliproxy-progress-summary">
+                    <div>
+                        <h3 class="cliproxy-section-title">聚合任务进度</h3>
+                        <p id="cliproxy-aggregate-progress-text" class="cliproxy-muted">
+                            {% if latest_task_payload %}
+                            当前 {{ latest_task_payload.run_type }} 任务状态：{{ latest_task_payload.status }}。
+                            {% else %}
+                            当前没有正在恢复的聚合任务。
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div class="cliproxy-meta-row">
+                        <span class="cliproxy-chip"><strong>状态</strong><span id="cliproxy-aggregate-status">{{ latest_task_payload.status if latest_task_payload else '-' }}</span></span>
+                        <span class="cliproxy-chip"><strong>完成服务</strong><span id="cliproxy-aggregate-service-completed">{{ latest_task_payload.service_completed if latest_task_payload else 0 }}</span>/<span id="cliproxy-aggregate-service-total">{{ latest_task_payload.service_total if latest_task_payload else 0 }}</span></span>
+                        <span class="cliproxy-chip"><strong>已处理记录</strong><span id="cliproxy-aggregate-record-progress">{{ latest_task_payload.processed_record_total if latest_task_payload else 0 }}</span></span>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="cliproxy-progress-track">
+                        <div id="cliproxy-aggregate-progress-bar" class="cliproxy-progress-bar" style="width: {{ latest_task_payload.progress_percent if latest_task_payload else 0 }}%;"></div>
+                    </div>
+                    <div id="cliproxy-service-progress-list" class="cliproxy-service-progress-list">
+                        {% if latest_task_payload %}
+                        {% for service in latest_task_payload.services %}
+                        {% set child_progress = 100 if service.status == 'completed' else (100 if service.status in ['failed', 'interrupted', 'cancelled'] else ((service.processed_count * 100 / service.known_record_total)|round|int if service.known_record_total else (0 if service.current_stage == 'queued' else 20))) %}
+                        <div class="cliproxy-child-card">
+                            <div class="cliproxy-service-card-header"><strong>{{ service.service_name }}</strong><span class="cliproxy-chip">{{ service.status }}</span></div>
+                            <div class="cliproxy-child-progress-track"><div class="cliproxy-child-progress-bar" style="width: {{ child_progress }}%;"></div></div>
+                            <div class="cliproxy-child-meta">
+                                <span class="cliproxy-chip"><strong>阶段</strong><span>{{ service.current_stage }}</span></span>
+                                <span class="cliproxy-chip"><strong>成功</strong><span>{{ service.success_count }}</span></span>
+                                <span class="cliproxy-chip"><strong>失败</strong><span>{{ service.failure_count }}</span></span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
+            <section id="cliproxy-grouped-log-region" class="card{% if not latest_task_payload %} hidden{% endif %}">
+                <div class="card-header">
+                    <div>
+                        <h3 class="cliproxy-section-title">分组日志</h3>
+                        <p class="cliproxy-muted">按服务分组查看子任务日志，便于区分哪个 CPA 服务正在执行或失败。</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="cliproxy-grouped-log-list" class="cliproxy-grouped-list">
+                        {% if latest_task_payload %}
+                        {% for service in latest_task_payload.services %}
+                        {% set lines = latest_task_payload.grouped_logs.get(service.service_id|string, []) %}
+                        <div class="cliproxy-grouped-card">
+                            <strong>{{ service.service_name }}</strong>
+                            <ol class="cliproxy-log-lines">
+                                {% if lines %}
+                                {% for line in lines %}
+                                <li>{{ line }}</li>
+                                {% endfor %}
+                                {% else %}
+                                <li>暂无日志</li>
+                                {% endif %}
+                            </ol>
+                        </div>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
+            <section id="cliproxy-grouped-result-region" class="card{% if not latest_task_payload %} hidden{% endif %}">
+                <div class="card-header">
+                    <div>
+                        <h3 class="cliproxy-section-title">分组结果</h3>
+                        <p class="cliproxy-muted">按服务查看 records、success/failure 和最近错误摘要。</p>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div id="cliproxy-grouped-result-list" class="cliproxy-grouped-list">
+                        {% if latest_task_payload %}
+                        {% for service in latest_task_payload.services %}
+                        {% set result = latest_task_payload.grouped_results.get(service.service_id|string, {}) %}
+                        <div class="cliproxy-grouped-card">
+                            <strong>{{ service.service_name }}</strong>
+                            <div class="cliproxy-grouped-meta">
+                                <span class="cliproxy-chip"><strong>records</strong><span>{{ result.get('records', 0) }}</span></span>
+                                <span class="cliproxy-chip"><strong>success</strong><span>{{ result.get('success_count', 0) }}</span></span>
+                                <span class="cliproxy-chip"><strong>failure</strong><span>{{ result.get('failure_count', 0) }}</span></span>
+                                <span class="cliproxy-chip"><strong>status</strong><span>{{ result.get('status', service.status) }}</span></span>
+                                <span class="cliproxy-chip"><strong>last_error</strong><span>{{ result.get('last_error') or '-' }}</span></span>
+                            </div>
+                        </div>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
+            <section
+                id="cliproxy-empty-state"
+                class="cliproxy-empty cliproxy-empty-state{% if cliproxy_has_cpa_services %} hidden{% endif %}"
+                data-empty-state="no-cpa-services"
+            >
+                <strong>暂无可用 CPA 服务</strong>
+                <p id="cliproxy-empty-state-message">当前没有可用的 CPA 服务；如果当前还没有可用的 CPA 服务，请先在设置中添加并启用至少一个 CPA 服务后再执行连接测试、扫描或维护。</p>
+            </section>
 
             <div class="cliproxy-stat-grid">
                 <div class="stat-card">
@@ -296,45 +645,7 @@
                 </aside>
 
                 <section class="cliproxy-stack">
-                    <section id="cliproxy-test-connection-section" class="card">
-                        <div class="card-header">
-                            <div>
-                                <h3>连接测试</h3>
-                                <p id="cliproxy-selection-summary">请选择左侧环境以执行连接测试。</p>
-                            </div>
-                            <div class="cliproxy-action-row">
-                                <button class="btn btn-secondary" id="cliproxy-test-connection-btn" disabled>测试连接</button>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="cliproxy-meta-row">
-                                <span class="cliproxy-chip"><strong>默认</strong><span id="cliproxy-selected-default">-</span></span>
-                                <span class="cliproxy-chip"><strong>连接状态</strong><span id="cliproxy-selected-test-status">-</span></span>
-                            </div>
-                            <div id="cliproxy-connection-result" class="cliproxy-connection-result">连接检测结果会显示在这里。</div>
-                        </div>
-                    </section>
-
-                    <section id="cliproxy-maintenance-actions-section" class="card">
-                        <div class="card-header">
-                            <div>
-                                <h3>扫描与维护动作</h3>
-                                <p>针对当前选中环境触发 scan / maintain 任务，并查看最近维护时间。</p>
-                            </div>
-                            <div class="cliproxy-action-row">
-                                <button class="btn btn-info" id="cliproxy-scan-btn" disabled>启动扫描</button>
-                                <button class="btn btn-warning" id="cliproxy-maintain-btn" disabled>执行维护</button>
-                            </div>
-                        </div>
-                        <div class="card-body">
-                            <div class="cliproxy-meta-row">
-                                <span class="cliproxy-chip"><strong>最近扫描</strong><span id="cliproxy-selected-scanned-at">-</span></span>
-                                <span class="cliproxy-chip"><strong>最近维护</strong><span id="cliproxy-selected-maintained-at">-</span></span>
-                            </div>
-                        </div>
-                    </section>
-
-                    <section class="card cliproxy-table-card">
+                    <section id="cliproxy-result-run-history-region" class="card cliproxy-table-card">
                         <div class="card-header cliproxy-card-header">
                             <div>
                                 <h3>运行历史</h3>
@@ -365,7 +676,7 @@
                         </div>
                     </section>
 
-                    <section class="card cliproxy-table-card">
+                    <section id="cliproxy-result-inventory-region" class="card cliproxy-table-card">
                         <div class="card-header cliproxy-card-header">
                             <div>
                                 <h3>远端库存</h3>
@@ -391,6 +702,31 @@
                                 </thead>
                                 <tbody id="cliproxy-inventory-body">
                                     <tr><td colspan="7" class="cliproxy-muted">请选择环境查看库存快照。</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    <section id="cliproxy-result-audit-region" class="card cliproxy-table-card">
+                        <div class="card-header cliproxy-card-header">
+                            <div>
+                                <h3>操作审计摘要</h3>
+                                <p>展示与 CLIProxy 结果区相关的最近审计事件，便于在刷新后回看动作结果。</p>
+                            </div>
+                        </div>
+                        <div class="cliproxy-table-scroll">
+                            <table class="cliproxy-table" id="cliproxy-audit-summary-table">
+                                <thead>
+                                    <tr>
+                                        <th>时间</th>
+                                        <th>事件</th>
+                                        <th>服务</th>
+                                        <th>状态</th>
+                                        <th>消息</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cliproxy-audit-summary-body">
+                                    <tr><td colspan="5" class="cliproxy-muted">刷新页面后将在此显示最近的 CLIProxy 审计摘要。</td></tr>
                                 </tbody>
                             </table>
                         </div>

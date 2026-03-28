@@ -7,12 +7,13 @@ from fastapi.testclient import TestClient
 
 from src.database import crud
 from src.database.init_db import initialize_database
-from src.database.models import CLIProxyAPIEnvironment
+from src.database.models import CLIProxyAPIEnvironment, BatchSubscriptionTask
 from src.database.session import get_db
 import src.database.session as session_module
 
 web_app_module = importlib.import_module("src.web.app")
 web_auth_module = importlib.import_module("src.web.auth")
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def make_fernet_key() -> str:
@@ -44,8 +45,13 @@ def build_client(monkeypatch, tmp_path: Path) -> TestClient:
     templates_dir.mkdir()
     static_dir.mkdir()
 
-    for name in ["login.html", "index.html", "accounts.html", "email_services.html", "settings.html", "payment.html"]:
+    for name in ["login.html", "index.html", "email_services.html", "settings.html", "payment.html"]:
         (templates_dir / name).write_text("<html><body>ok</body></html>", encoding="utf-8")
+
+    (templates_dir / "accounts.html").write_text(
+        (REPO_ROOT / "templates" / "accounts.html").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
 
     db_path = tmp_path / "accounts_workbench_routes.db"
     monkeypatch.setenv("APP_DATABASE_URL", f"sqlite:///{db_path}")
@@ -294,4 +300,183 @@ def test_account_detail_exposes_workbench_panels_required_for_summary_rendering(
         "recent_task_status": None,
         "recent_task_label": "No recent account task",
         "log_excerpt": "Maintain run completed at 2026-03-22T09:00:00 with records=1, matches=1, disabled=0.",
+    }
+
+
+def test_accounts_template_fixture_contains_batch_check_progress_panel_markers(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/accounts", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="batch-check-task-panel"' in response.text
+    assert 'data-task-panel="batch-subscription-check"' in response.text
+    assert 'id="batch-check-task-summary"' in response.text
+    assert 'id="batch-check-task-total-count"' in response.text
+    assert 'id="batch-check-task-processed-count"' in response.text
+    assert 'id="batch-check-task-success-count"' in response.text
+    assert 'id="batch-check-task-failure-count"' in response.text
+    assert 'id="batch-check-task-progress-text"' in response.text
+    assert 'class="batch-task-progress-track"' in response.text
+    assert 'id="batch-check-task-progress-bar"' in response.text
+    assert 'id="batch-check-task-current-account"' in response.text
+    assert 'id="batch-check-task-current-account-value"' in response.text
+    assert 'id="batch-check-task-log-list"' in response.text
+    assert 'id="batch-check-task-log-empty"' in response.text
+
+
+def test_accounts_list_limits_primary_columns_and_keeps_workbench_summaries_visible(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/accounts", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="accounts-list-primary-columns"' in response.text
+    assert 'data-primary-column-count="5"' in response.text
+    assert 'data-primary-column="email"' in response.text
+    assert 'data-primary-column="status"' in response.text
+    assert 'data-primary-column="subscription"' in response.text
+    assert 'data-primary-column="recent-activity"' in response.text
+    assert 'data-primary-column="source-target"' in response.text
+    assert 'data-primary-column="batch-actions"' not in response.text
+    assert 'id="detail-subscription-quota"' in response.text
+    assert 'id="detail-automation-trace"' in response.text
+    assert 'id="detail-cliproxy-summary"' in response.text
+
+
+def test_accounts_low_frequency_fields_render_only_in_detail_area(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/accounts", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="account-secondary-detail-region"' in response.text
+    assert 'data-detail-only-field="account-id"' in response.text
+    assert 'data-detail-only-field="email-service"' in response.text
+    assert 'data-detail-only-field="workspace-id"' in response.text
+    assert 'data-detail-only-field="password"' in response.text
+    assert 'data-detail-only-field="remote-environment"' in response.text
+    assert 'data-detail-only-field="upload-target"' in response.text
+    assert 'data-detail-only-field="remote-file"' in response.text
+    assert 'data-detail-only-field="probe-status"' in response.text
+    assert 'data-primary-column="password"' not in response.text
+    assert 'data-primary-column="workspace-id"' not in response.text
+    assert 'data-primary-column="remote-environment"' not in response.text
+    assert 'data-primary-column="upload-target"' not in response.text
+    assert 'data-primary-column="email-service"' not in response.text
+
+
+def test_completed_batch_check_refreshes_subscription_summaries_for_affected_accounts(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    first_account_id = seed_account_workbench_data()
+
+    with get_db() as db:
+        second_account = crud.create_account(
+            db,
+            email="second-workbench@example.com",
+            email_service="tempmail",
+            account_id="acct-workbench-2",
+            workspace_id="ws-456",
+            platform_source="cloudmail",
+            last_upload_target="newApi",
+            extra_data={"plan": "free"},
+        )
+        second_account.subscription_type = None
+        second_account.subscription_at = None
+        db.commit()
+        second_account_id = second_account.id
+
+        first_account = crud.get_account_by_id(db, first_account_id)
+        assert first_account is not None
+        first_account.subscription_type = "team"
+        first_account.subscription_at = datetime(2026, 3, 28, 12, 0, 0)
+
+        refreshed_second = crud.get_account_by_id(db, second_account_id)
+        assert refreshed_second is not None
+        refreshed_second.subscription_type = "plus"
+        refreshed_second.subscription_at = datetime(2026, 3, 28, 12, 5, 0)
+
+        task = BatchSubscriptionTask(
+            task_type=crud.BATCH_SUBSCRIPTION_TASK_TYPE,
+            owner_key="owner:test",
+            session_id="session-test",
+            scope_key="account-scope",
+            status="completed",
+            total_count=2,
+            processed_count=2,
+            success_count=2,
+            failure_count=0,
+            request_payload={"ids": [first_account_id, second_account_id]},
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    response = client.get(
+        "/api/accounts",
+        params={"refresh_task_id": task_id},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["refreshed_account_ids"] == [first_account_id, second_account_id]
+
+    refreshed_accounts = {item["id"]: item for item in payload["accounts"]}
+    assert refreshed_accounts[first_account_id]["subscription_summary"] == {
+        "subscription_type": "team",
+        "subscription_at": "2026-03-28T12:00:00",
+        "has_subscription": True,
+    }
+    assert refreshed_accounts[second_account_id]["subscription_summary"] == {
+        "subscription_type": "plus",
+        "subscription_at": "2026-03-28T12:05:00",
+        "has_subscription": True,
+    }
+
+
+def test_accounts_page_recovers_latest_active_batch_task_without_client_scope_reconstruction(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    session_cookie = login_response.cookies.get("session_id")
+    session_id = web_auth_module.parse_session_cookie(session_cookie)
+    assert session_id is not None
+
+    with get_db() as db:
+        task = BatchSubscriptionTask(
+            task_type=crud.BATCH_SUBSCRIPTION_TASK_TYPE,
+            owner_key=crud.build_batch_subscription_owner_key(session_id),
+            session_id=session_id,
+            scope_key="server-generated-scope-key",
+            status="running",
+            total_count=3,
+            processed_count=1,
+            success_count=1,
+            failure_count=0,
+            current_account="acct-workbench",
+            request_payload={
+                "ids": [101, 102, 103],
+                "status_filter": "active",
+                "search_filter": "workbench",
+            },
+        )
+        db.add(task)
+        db.commit()
+
+    response = client.get("/api/accounts")
+
+    assert response.status_code == 200
+    assert response.json()["latest_batch_check_task"] == {
+        "task_id": "1",
+        "status": "running",
+        "scope_key": "server-generated-scope-key",
     }

@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 from ...database import crud
 from ...database.session import get_db
-from ...database.models import EmailService as EmailServiceModel
+from ...database.models import EmailService as EmailServiceModel, normalize_temp_mail_config
 from ...services import EmailServiceFactory, EmailServiceType
 
 logger = logging.getLogger(__name__)
@@ -91,8 +91,15 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if not config:
         return {}
 
+    normalized_source = config
+    if config.get("domains") is not None or config.get("domain") is not None:
+        try:
+            normalized_source = normalize_temp_mail_config(config)
+        except ValueError:
+            normalized_source = dict(config)
+
     filtered = {}
-    for key, value in config.items():
+    for key, value in normalized_source.items():
         if key in SENSITIVE_FIELDS:
             # 敏感字段不返回，但标记是否存在
             filtered[f"has_{key}"] = bool(value)
@@ -141,6 +148,10 @@ def validate_service_config_for_update(service_type: str, config: Dict[str, Any]
             raise HTTPException(status_code=400, detail="启用的 TempMail 服务必须保留 base_url")
         if not config.get("admin_password"):
             raise HTTPException(status_code=400, detail="启用的 TempMail 服务不能清除 admin_password")
+        try:
+            normalize_temp_mail_config(config)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     elif service_type == "imap_mail":
         if not config.get("host") or not config.get("email"):
             raise HTTPException(status_code=400, detail="启用的 IMAP 服务必须保留 host 和 email")
@@ -368,12 +379,19 @@ async def create_email_service(request: EmailServiceCreate):
         if existing:
             raise HTTPException(status_code=400, detail="服务名称已存在")
 
-        validate_service_config_for_update(request.service_type, request.config or {}, request.enabled)
+        config_payload = request.config or {}
+        if request.service_type == "temp_mail":
+            try:
+                config_payload = normalize_temp_mail_config(config_payload)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        validate_service_config_for_update(request.service_type, config_payload, request.enabled)
 
         service = EmailServiceModel(
             service_type=request.service_type,
             name=request.name,
-            config=request.config,
+            config=config_payload,
             enabled=request.enabled,
             priority=request.priority
         )
@@ -402,6 +420,11 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
             merged_config = {**effective_config, **request.config}
             # 仅移除显式置空为 None 的字段，保留空字符串/False/0 以支持主动清空或关闭开关
             merged_config = {k: v for k, v in merged_config.items() if v is not None}
+            if service.service_type == "temp_mail":
+                try:
+                    merged_config = normalize_temp_mail_config(merged_config)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
             effective_config = merged_config
             update_data["config"] = merged_config
         validate_service_config_for_update(service.service_type, effective_config, final_enabled)

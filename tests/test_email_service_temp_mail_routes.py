@@ -44,6 +44,21 @@ def test_filter_sensitive_config_marks_temp_mail_site_password():
     assert "site_password" not in filtered
 
 
+def test_filter_sensitive_config_surfaces_tempmail_domains_and_display_alias():
+    filtered = email_routes.filter_sensitive_config(
+        {
+            "base_url": "https://mail.example.com",
+            "admin_password": "admin-secret",
+            "domains": ["alpha.example", "beta.example"],
+            "domain": "alpha.example,beta.example",
+        }
+    )
+
+    assert filtered["domains"] == ["alpha.example", "beta.example"]
+    assert filtered["domain"] == "alpha.example,beta.example"
+    assert filtered["has_admin_password"] is True
+
+
 def test_update_email_service_allows_clearing_optional_config_fields(monkeypatch):
     runtime_dir = Path("tests_runtime")
     runtime_dir.mkdir(exist_ok=True)
@@ -139,3 +154,97 @@ def test_get_email_service_full_redacts_sensitive_fields_for_browser(monkeypatch
     assert result["config"]["has_site_password"] is True
     assert "admin_password" not in result["config"]
     assert "site_password" not in result["config"]
+
+
+def test_get_email_service_full_reads_legacy_tempmail_domain_as_domains_list(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "temp_mail_full_legacy_routes.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        service = EmailService(
+            service_type="temp_mail",
+            name="TempMail Legacy",
+            config={
+                "base_url": "https://mail.example.com",
+                "admin_password": "admin-secret",
+                "domain": "legacy.example",
+            },
+            enabled=True,
+            priority=0,
+        )
+        session.add(service)
+        session.flush()
+        service_id = service.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(email_routes, "get_db", fake_get_db)
+
+    result = asyncio.run(email_routes.get_email_service_full(service_id))
+
+    assert result["config"]["domains"] == ["legacy.example"]
+    assert result["config"]["domain"] == "legacy.example"
+
+
+def test_get_email_service_prefers_domains_over_legacy_domain_on_read(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "temp_mail_full_domains_routes.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        service = EmailService(
+            service_type="temp_mail",
+            name="TempMail Canonical",
+            config={
+                "base_url": "https://mail.example.com",
+                "admin_password": "admin-secret",
+                "domains": ["alpha.example", "beta.example"],
+                "domain": "legacy.example",
+            },
+            enabled=True,
+            priority=0,
+        )
+        session.add(service)
+        session.flush()
+        service_id = service.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(email_routes, "get_db", fake_get_db)
+
+    result = asyncio.run(email_routes.get_email_service(service_id))
+
+    assert result.config["domains"] == ["alpha.example", "beta.example"]
+    assert result.config["domain"] == "alpha.example,beta.example"
+
+
+def test_email_services_js_preserves_tempmail_domain_alias_in_settings_flow():
+    script = Path("/config/workspace/github.com/codex-console/.worktrees/account-workbench-maintain/static/js/email_services.js").read_text(encoding="utf-8")
+
+    assert "tempmailDomain" in script
+    assert "document.getElementById('tempmail-domain')" in script
+    assert "elements.tempmailDomain.value = settings.tempmail.domain || ''" in script
+    assert "domain: elements.tempmailDomain.value" in script

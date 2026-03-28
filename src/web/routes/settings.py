@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from ...config.settings import get_settings, update_settings
 from ...database import crud
 from ...database.session import get_db
+from ...database.models import normalize_temp_mail_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -379,6 +380,8 @@ async def get_recent_logs(
 class TempmailSettings(BaseModel):
     """临时邮箱设置"""
     api_url: Optional[str] = None
+    domain: Optional[str] = None
+    domains: Optional[list[str]] = None
     enabled: bool = True
 
 
@@ -393,10 +396,20 @@ async def get_tempmail_settings():
     """获取临时邮箱设置"""
     settings = get_settings()
 
+    raw_domains = getattr(settings, "tempmail_domains", None)
+    raw_domain = getattr(settings, "tempmail_domain", "")
+    domain_payload = {}
+    if raw_domains:
+        domain_payload = normalize_temp_mail_config({"domains": raw_domains})
+    elif raw_domain:
+        domain_payload = normalize_temp_mail_config({"domain": raw_domain})
+
     return {
         "api_url": settings.tempmail_base_url,
         "timeout": settings.tempmail_timeout,
         "max_retries": settings.tempmail_max_retries,
+        "domains": domain_payload.get("domains", []),
+        "domain": domain_payload.get("domain", ""),
         "enabled": True  # 临时邮箱默认可用
     }
 
@@ -408,6 +421,13 @@ async def update_tempmail_settings(request: TempmailSettings):
 
     if request.api_url:
         update_dict["tempmail_base_url"] = request.api_url
+
+    if request.domains is not None or request.domain is not None:
+        try:
+            normalized = normalize_temp_mail_config({"domains": request.domains, "domain": request.domain})
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        update_dict["tempmail_domains"] = normalized["domains"]
 
     update_settings(**update_dict)
 

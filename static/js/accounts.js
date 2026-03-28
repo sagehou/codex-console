@@ -13,6 +13,14 @@ let selectAllPages = false;  // 是否选中了全部页
 let currentFilters = { status: '', email_service: '', search: '' };  // 当前筛选条件
 let currentAccounts = [];
 let activeAccountId = null;
+let batchCheckTaskState = {
+    taskId: null,
+    scopeKey: null,
+    logOffset: 0,
+    pollTimer: null,
+    isPolling: false,
+    completionRefreshDone: false
+};
 
 // DOM 元素
 const elements = {
@@ -45,19 +53,34 @@ const elements = {
     bulkSelectionContext: document.getElementById('bulk-selection-context'),
     detailIdentityTitle: document.getElementById('detail-identity-title'),
     detailIdentitySubtitle: document.getElementById('detail-identity-subtitle'),
+    secondaryDetailRegion: document.getElementById('account-secondary-detail-region'),
     detailSubscriptionQuota: document.getElementById('detail-subscription-quota'),
     detailCoreOps: document.getElementById('detail-core-ops'),
     detailAutomationTrace: document.getElementById('detail-automation-trace'),
-    detailCliProxySummary: document.getElementById('detail-cliproxy-summary')
+    detailCliProxySummary: document.getElementById('detail-cliproxy-summary'),
+    batchCheckTaskPanel: document.getElementById('batch-check-task-panel'),
+    batchCheckTaskStatus: document.getElementById('batch-check-task-status'),
+    batchCheckTaskSummary: document.getElementById('batch-check-task-summary'),
+    batchCheckTaskTotalCount: document.getElementById('batch-check-task-total-count'),
+    batchCheckTaskProcessedCount: document.getElementById('batch-check-task-processed-count'),
+    batchCheckTaskSuccessCount: document.getElementById('batch-check-task-success-count'),
+    batchCheckTaskFailureCount: document.getElementById('batch-check-task-failure-count'),
+    batchCheckTaskProgressBar: document.getElementById('batch-check-task-progress-bar'),
+    batchCheckTaskProgressText: document.getElementById('batch-check-task-progress-text'),
+    batchCheckTaskCurrentAccount: document.getElementById('batch-check-task-current-account'),
+    batchCheckTaskCurrentAccountValue: document.getElementById('batch-check-task-current-account-value'),
+    batchCheckTaskLogList: document.getElementById('batch-check-task-log-list'),
+    batchCheckTaskLogEmpty: document.getElementById('batch-check-task-log-empty')
 };
 
 // 初始化
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     loadStats();
-    loadAccounts();
     initEventListeners();
     updateBatchButtons();  // 初始化按钮状态
     renderSelectAllBanner();
+    await loadAccounts();
+    await restoreLatestBatchCheckTask();
 });
 
 // 事件监听
@@ -239,6 +262,10 @@ async function loadAccounts() {
         page_size: pageSize,
     });
 
+    if (batchCheckTaskState.taskId && batchCheckTaskState.completionRefreshDone) {
+        params.append('refresh_task_id', batchCheckTaskState.taskId);
+    }
+
     if (currentFilters.status) {
         params.append('status', currentFilters.status);
     }
@@ -255,6 +282,13 @@ async function loadAccounts() {
         const data = await api.get(`/accounts?${params}`);
         totalAccounts = data.total;
         currentAccounts = data.accounts;
+        if (!batchCheckTaskState.taskId && data.latest_batch_check_task?.task_id) {
+            batchCheckTaskState.taskId = data.latest_batch_check_task.task_id;
+            batchCheckTaskState.scopeKey = data.latest_batch_check_task.scope_key || null;
+        }
+        if (Array.isArray(data.refreshed_account_ids) && data.refreshed_account_ids.length > 0) {
+            batchCheckTaskState.completionRefreshDone = false;
+        }
         if (activeAccountId && !currentAccounts.some(account => account.id === activeAccountId)) {
             activeAccountId = null;
         }
@@ -306,42 +340,28 @@ function renderAccounts(accounts) {
                 <div class="account-title-row">
                     <button type="button" class="account-email-button" data-view-account="${account.id}" title="查看详情">${escapeHtml(account.email)}</button>
                     <button class="btn-copy-icon copy-email-btn" data-email="${escapeHtml(account.email)}" title="复制邮箱">📋</button>
-                    <span class="summary-pill"><strong>ID ${account.id}</strong><span>${getServiceTypeText(account.email_service)}</span></span>
-                    <span class="summary-pill"><strong>${escapeHtml(account.platform_source || 'unknown')}</strong><span>platform_source</span></span>
                 </div>
-                <div class="account-summary-grid">
-                    <span class="summary-pill"><strong>${formatSubscriptionLabel(account)}</strong><span>subscription / quota</span></span>
-                    <span class="summary-pill"><strong>${formatRiskLabel(account)}</strong><span>risk / pending</span></span>
-                    <span class="summary-pill"><strong>${formatRecentActivityLabel(account)}</strong><span>recent activity</span></span>
-                    <span class="summary-pill"><strong>${formatRemoteMaintenanceLabel(account)}</strong><span>remote maintenance</span></span>
+                <div class="account-primary-columns">
+                    <div class="micro-panel" data-primary-column="status">
+                        <h4>状态</h4>
+                        <p>${escapeHtml(getStatusText('account', account.status))}；${formatRiskPanel(account)}</p>
+                    </div>
+                    <div class="micro-panel" data-primary-column="subscription">
+                        <h4>订阅</h4>
+                        <p>${formatSubscriptionPanel(account)}</p>
+                    </div>
+                    <div class="micro-panel" data-primary-column="recent-activity">
+                        <h4>最近活动</h4>
+                        <p>${formatRecentActivityPanel(account)}</p>
+                    </div>
+                    <div class="micro-panel" data-primary-column="source-target">
+                        <h4>Source / Target</h4>
+                        <p>${formatSourceTargetPanel(account)}</p>
+                    </div>
                 </div>
                 <div class="account-status-row">
-                    <span class="summary-pill"><strong>${getStatusText('account', account.status)}</strong><span>账号状态</span></span>
-                    <span class="summary-pill"><strong>${escapeHtml(account.remote_environment_name || '-')}</strong><span>环境</span></span>
-                    <span class="summary-pill"><strong>${escapeHtml(account.last_upload_target || '-')}</strong><span>upload target</span></span>
-                </div>
-                <div class="password-cell">
-                    ${account.password
-                    ? `<span style="display:inline-flex;align-items:center;gap:4px;">
-                        <span class="password-hidden" data-pwd="${escapeHtml(account.password)}" onclick="togglePassword(this, this.dataset.pwd)" title="点击查看">${escapeHtml(account.password.substring(0, 4) + '****')}</span>
-                        <button class="btn-copy-icon copy-pwd-btn" data-pwd="${escapeHtml(account.password)}" title="复制密码">📋</button>
-                        </span>`
-                    : '-'}
-                </div>
-                </div>
-            </div>
-            <div class="account-supporting">
-                <div class="micro-panel">
-                    <h4>订阅与额度</h4>
-                    <p>${formatSubscriptionPanel(account)}</p>
-                </div>
-                <div class="micro-panel">
-                    <h4>风险与最近活动</h4>
-                    <p>${formatRiskPanel(account)}；${formatRecentActivityPanel(account)}</p>
-                </div>
-                <div class="micro-panel">
-                    <h4>远程维护摘要</h4>
-                    <p>${formatRemoteMaintenancePanel(account)}</p>
+                    <span class="summary-pill"><strong>${escapeHtml(account.platform_source || 'unknown')}</strong><span>source</span></span>
+                    <span class="summary-pill"><strong>${escapeHtml(account.last_upload_target || '未设置')}</strong><span>target summary</span></span>
                 </div>
             </div>
             <div class="account-actions">
@@ -540,6 +560,135 @@ function updateBatchButtons() {
     }
 }
 
+function isBatchTaskActiveStatus(status) {
+    return status === 'queued' || status === 'running';
+}
+
+function clearBatchCheckPollTimer() {
+    if (batchCheckTaskState.pollTimer) {
+        clearTimeout(batchCheckTaskState.pollTimer);
+        batchCheckTaskState.pollTimer = null;
+    }
+}
+
+function showBatchCheckTaskPanel() {
+    if (!elements.batchCheckTaskPanel) return;
+    elements.batchCheckTaskPanel.hidden = false;
+    elements.batchCheckTaskPanel.classList.add('is-visible');
+}
+
+function renderBatchCheckLogs(logs = [], append = false) {
+    if (!elements.batchCheckTaskLogList || !elements.batchCheckTaskLogEmpty) return;
+    if (!append) {
+        elements.batchCheckTaskLogList.innerHTML = '';
+    }
+    logs.forEach((line) => {
+        const item = document.createElement('li');
+        item.textContent = line;
+        elements.batchCheckTaskLogList.appendChild(item);
+    });
+    const hasLogs = elements.batchCheckTaskLogList.children.length > 0;
+    elements.batchCheckTaskLogEmpty.hidden = hasLogs;
+    elements.batchCheckTaskLogList.hidden = !hasLogs;
+    if (hasLogs) {
+        elements.batchCheckTaskLogList.scrollTop = elements.batchCheckTaskLogList.scrollHeight;
+    }
+}
+
+function renderBatchCheckTaskPanel(task, options = {}) {
+    if (!task || !elements.batchCheckTaskPanel) return;
+    const appendLogs = Boolean(options.appendLogs);
+    const totalCount = Number(task.total_count || 0);
+    const processedCount = Number(task.processed_count || 0);
+    const successCount = Number(task.success_count || 0);
+    const failureCount = Number(task.failure_count || 0);
+    const progressPercent = Math.max(0, Math.min(100, Number(task.progress_percent || 0)));
+    const currentAccount = task.current_account || '等待任务开始';
+    const status = task.status || 'queued';
+
+    batchCheckTaskState.taskId = task.task_id || batchCheckTaskState.taskId;
+    if (task.scope_key) {
+        batchCheckTaskState.scopeKey = task.scope_key;
+    }
+    if (typeof task.next_log_offset === 'number') {
+        batchCheckTaskState.logOffset = task.next_log_offset;
+    }
+
+    showBatchCheckTaskPanel();
+    elements.batchCheckTaskStatus.innerHTML = `<strong>${escapeHtml(status)}</strong><span>task status</span>`;
+    elements.batchCheckTaskTotalCount.textContent = format.number(totalCount);
+    elements.batchCheckTaskProcessedCount.textContent = format.number(processedCount);
+    elements.batchCheckTaskSuccessCount.textContent = format.number(successCount);
+    elements.batchCheckTaskFailureCount.textContent = format.number(failureCount);
+    elements.batchCheckTaskProgressText.textContent = `${progressPercent}%`;
+    elements.batchCheckTaskProgressBar.style.width = `${progressPercent}%`;
+    elements.batchCheckTaskProgressBar.parentElement?.setAttribute('aria-valuenow', String(progressPercent));
+    elements.batchCheckTaskCurrentAccountValue.textContent = currentAccount;
+    renderBatchCheckLogs(task.logs || [], appendLogs);
+}
+
+async function pollBatchCheckTask(taskId, options = {}) {
+    if (!taskId || batchCheckTaskState.isPolling) return;
+    const resetLogs = Boolean(options.resetLogs);
+    batchCheckTaskState.isPolling = true;
+    clearBatchCheckPollTimer();
+
+    try {
+        const logOffset = resetLogs ? 0 : batchCheckTaskState.logOffset;
+        const payload = await api.get(`/payment/tasks/${taskId}?log_offset=${logOffset}`);
+        renderBatchCheckTaskPanel(payload, { appendLogs: !resetLogs && logOffset > 0 });
+
+        if (isBatchTaskActiveStatus(payload.status)) {
+            batchCheckTaskState.pollTimer = setTimeout(() => {
+                batchCheckTaskState.isPolling = false;
+                pollBatchCheckTask(taskId);
+            }, 2000);
+            return;
+        }
+
+        batchCheckTaskState.isPolling = false;
+        clearBatchCheckPollTimer();
+        if (!batchCheckTaskState.completionRefreshDone && payload.status === 'completed') {
+            batchCheckTaskState.completionRefreshDone = true;
+            await loadAccounts();
+        }
+        updateBatchButtons();
+    } catch (error) {
+        batchCheckTaskState.isPolling = false;
+        clearBatchCheckPollTimer();
+        toast.error('任务状态查询失败: ' + error.message);
+    }
+}
+
+async function restoreLatestBatchCheckTask() {
+    try {
+        let result = null;
+        if (batchCheckTaskState.taskId) {
+            result = {
+                task_id: batchCheckTaskState.taskId,
+                scope_key: batchCheckTaskState.scopeKey,
+            };
+        } else {
+            const listPayload = await api.get(`/accounts?page=${currentPage}&page_size=${pageSize}`);
+            totalAccounts = listPayload.total;
+            currentAccounts = listPayload.accounts;
+            renderAccounts(listPayload.accounts);
+            updatePagination();
+            result = listPayload.latest_batch_check_task;
+        }
+        if (!result || !result.task_id) {
+            return;
+        }
+        batchCheckTaskState.taskId = result.task_id;
+        batchCheckTaskState.scopeKey = result.scope_key || null;
+        batchCheckTaskState.completionRefreshDone = false;
+        batchCheckTaskState.logOffset = 0;
+        await pollBatchCheckTask(result.task_id, { resetLogs: true });
+    } catch (error) {
+        console.error('恢复批量检测任务失败:', error);
+    }
+}
+
 // 刷新单个账号Token
 async function refreshToken(id) {
     try {
@@ -605,6 +754,7 @@ async function viewAccount(id) {
         activeAccountId = id;
         renderAccounts(currentAccounts);
         updateDetailIdentity(account);
+        renderSecondaryDetailRegion(account, tokens);
         renderSubscriptionQuotaLayer(account);
         renderCoreOpsLayer(account, tokens);
         renderAutomationTraceLayer(account, tokens);
@@ -910,10 +1060,27 @@ async function handleBatchCheckSubscription() {
 
     try {
         const result = await api.post('/payment/accounts/batch-check-subscription', buildBatchPayload());
-        let message = `成功: ${result.success_count}`;
-        if (result.failed_count > 0) message += `, 失败: ${result.failed_count}`;
-        toast.success(message);
-        loadAccounts();
+        batchCheckTaskState.taskId = result.task_id;
+        batchCheckTaskState.scopeKey = result.scope_key || null;
+        batchCheckTaskState.logOffset = 0;
+        batchCheckTaskState.completionRefreshDone = false;
+
+        renderBatchCheckTaskPanel({
+            task_id: result.task_id,
+            status: result.status,
+            scope_key: result.scope_key,
+            total_count: count,
+            processed_count: 0,
+            success_count: 0,
+            failure_count: 0,
+            current_account: null,
+            progress_percent: 0,
+            logs: [result.reused ? '复用已有批量检测任务，继续恢复进度。' : '已创建批量检测任务，正在等待后台执行。'],
+            next_log_offset: 1
+        }, { appendLogs: false });
+
+        toast.success(result.reused ? '已恢复现有批量检测任务' : '已启动批量检测任务');
+        await pollBatchCheckTask(result.task_id, { resetLogs: true });
     } catch (e) {
         toast.error('批量检测失败: ' + e.message);
     } finally {
@@ -1221,10 +1388,43 @@ function renderEmptyDetailPanel() {
     if (!elements.detailSubscriptionQuota) return;
     elements.detailIdentityTitle.textContent = '选择一个账号';
     elements.detailIdentitySubtitle.textContent = '从左侧主列表选择账号，查看订阅、额度、远程维护和 CLIProxy 摘要。';
+    if (elements.secondaryDetailRegion) {
+        elements.secondaryDetailRegion.innerHTML = `
+            <h4>低频字段收纳区</h4>
+            <div class="detail-empty">账号 ID、邮箱服务、workspace、密码、远程环境、upload target、remote file 和 probe 状态只在这里显示。</div>
+        `;
+    }
     elements.detailSubscriptionQuota.textContent = '在这里查看订阅类型、额度限制、风险/待处理状态以及最近活动概览。';
     elements.detailCoreOps.textContent = '账号身份头部、核心运维卡片和常用快捷操作会在这里展开。';
     elements.detailAutomationTrace.textContent = '显示 source、batch、proxy、recent tasks 和日志摘录。';
     elements.detailCliProxySummary.textContent = '显示账号侧 CLIProxy 关联环境、远程文件、同步状态，以及进入维护视图的入口。';
+}
+
+function renderSecondaryDetailRegion(account, tokens) {
+    if (!elements.secondaryDetailRegion) return;
+    const remote = account.remote_inventory_summary || {};
+    const passwordMarkup = account.password
+        ? `<span style="display:inline-flex;align-items:center;gap:4px;">
+            <span class="password-hidden" data-pwd="${escapeHtml(account.password)}" onclick="togglePassword(this, this.dataset.pwd)" title="点击查看">${escapeHtml(account.password.substring(0, 4) + '****')}</span>
+            <button class="btn-copy-icon copy-pwd-btn" data-pwd="${escapeHtml(account.password)}" title="复制密码">📋</button>
+        </span>`
+        : '<span>-</span>';
+
+    elements.secondaryDetailRegion.innerHTML = `
+        <h4>低频字段收纳区</h4>
+        <div class="detail-chip-row">
+            <span class="detail-chip" data-detail-only-field="account-id"><strong>${escapeHtml(account.account_id || '-')}</strong><span>account id</span></span>
+            <span class="detail-chip" data-detail-only-field="email-service"><strong>${escapeHtml(getServiceTypeText(account.email_service) || '-')}</strong><span>email service</span></span>
+            <span class="detail-chip" data-detail-only-field="workspace-id"><strong>${escapeHtml(account.workspace_id || '-')}</strong><span>workspace</span></span>
+            <span class="detail-chip" data-detail-only-field="remote-environment"><strong>${escapeHtml(remote.environment_name || account.remote_environment_name || '-')}</strong><span>environment</span></span>
+            <span class="detail-chip" data-detail-only-field="upload-target"><strong>${escapeHtml(account.last_upload_target || '-')}</strong><span>upload target</span></span>
+            <span class="detail-chip" data-detail-only-field="remote-file"><strong>${escapeHtml(remote.remote_file_id || '-')}</strong><span>remote file</span></span>
+            <span class="detail-chip" data-detail-only-field="probe-status"><strong>${escapeHtml(remote.probe_status || account.quota_summary?.probe_status || '-')}</strong><span>probe</span></span>
+            <span class="detail-chip" data-detail-only-field="password"><strong>${tokens.access_token ? 'tokens ready' : 'tokens partial'}</strong><span>password below</span></span>
+        </div>
+        <p>这些字段保留在次级区域，避免主列表首屏过载。</p>
+        <div class="password-cell">${passwordMarkup}</div>
+    `;
 }
 
 function renderSubscriptionQuotaLayer(account) {
@@ -1244,9 +1444,8 @@ function renderSubscriptionQuotaLayer(account) {
 function renderCoreOpsLayer(account, tokens) {
     elements.detailCoreOps.innerHTML = `
         <div class="detail-chip-row">
-            <span class="detail-chip"><strong>${escapeHtml(account.account_id || '-')}</strong><span>account id</span></span>
-            <span class="detail-chip"><strong>${escapeHtml(account.workspace_id || '-')}</strong><span>workspace</span></span>
             <span class="detail-chip"><strong>${escapeHtml(account.client_id || '-')}</strong><span>client</span></span>
+            <span class="detail-chip"><strong>${account.export_status_summary?.cpa_uploaded ? 'uploaded' : 'pending'}</strong><span>CPA export</span></span>
         </div>
         <div class="detail-action-grid">
             <button class="btn btn-primary btn-sm" onclick="refreshToken(${account.id})">刷新 Token</button>
@@ -1332,4 +1531,8 @@ function formatRecentActivityPanel(account) {
 
 function formatRemoteMaintenancePanel(account) {
     return `${escapeHtml(account.remote_environment_name || '未关联环境')} · ${escapeHtml(account.last_maintenance_status || '未维护')} · ${escapeHtml(account.last_upload_target || '未上传')}`;
+}
+
+function formatSourceTargetPanel(account) {
+    return `${escapeHtml(account.platform_source || 'unknown source')} -> ${escapeHtml(account.last_upload_target || '未设置')}；${escapeHtml(account.last_maintenance_status || 'no maintenance')}`;
 }

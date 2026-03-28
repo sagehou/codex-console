@@ -40,6 +40,7 @@ const elements = {
     // 临时邮箱
     tempmailForm: document.getElementById('tempmail-form'),
     tempmailApi: document.getElementById('tempmail-api'),
+    tempmailDomain: document.getElementById('tempmail-domain'),
     tempmailEnabled: document.getElementById('tempmail-enabled'),
     testTempmailBtn: document.getElementById('test-tempmail-btn'),
 
@@ -402,6 +403,7 @@ async function loadTempmailConfig() {
         const settings = await api.get('/settings');
         if (settings.tempmail) {
             elements.tempmailApi.value = settings.tempmail.api_url || '';
+            elements.tempmailDomain.value = settings.tempmail.domain || '';
             elements.tempmailEnabled.checked = settings.tempmail.enabled !== false;
         }
     } catch (error) {
@@ -590,6 +592,7 @@ async function handleSaveTempmail(e) {
     try {
         await api.post('/settings/tempmail', {
             api_url: elements.tempmailApi.value,
+            domain: elements.tempmailDomain.value,
             enabled: elements.tempmailEnabled.checked
         });
         toast.success('配置已保存');

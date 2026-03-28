@@ -8,7 +8,7 @@ import zipfile
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Body
+from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Body, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -27,8 +27,9 @@ from ...core.upload.sub2api_upload import (
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
 from ...database import crud
-from ...database.models import Account
+from ...database.models import Account, BatchSubscriptionTask
 from ...database.session import get_db
+from ..auth import get_current_session_id
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -98,6 +99,8 @@ class AccountListResponse(BaseModel):
     """账号列表响应"""
     total: int
     accounts: List[AccountWorkbenchListResponse]
+    refreshed_account_ids: List[int] = []
+    latest_batch_check_task: Optional[dict] = None
 
 
 class AccountUpdateRequest(BaseModel):
@@ -205,11 +208,13 @@ def account_to_detail_response(account: Account, workbench_summary: Optional[dic
 
 @router.get("", response_model=AccountListResponse)
 async def list_accounts(
+    request: Request,
     page: int = Query(1, ge=1, description="页码"),
     page_size: int = Query(20, ge=1, le=100, description="每页数量"),
     status: Optional[str] = Query(None, description="状态筛选"),
     email_service: Optional[str] = Query(None, description="邮箱服务筛选"),
     search: Optional[str] = Query(None, description="搜索关键词"),
+    refresh_task_id: Optional[int] = Query(None, ge=1, description="完成后的批量检测任务 ID"),
 ):
     """
     获取账号列表
@@ -217,6 +222,20 @@ async def list_accounts(
     支持分页、状态筛选、邮箱服务筛选和搜索
     """
     with get_db() as db:
+        refreshed_account_ids: List[int] = []
+        latest_batch_check_task = None
+        session_id = get_current_session_id(request)
+
+        if session_id:
+            owner_key = crud.build_batch_subscription_owner_key(session_id)
+            latest_task = crud.get_latest_active_batch_subscription_task(db, owner_key=owner_key)
+            if latest_task is not None:
+                latest_batch_check_task = {
+                    "task_id": str(latest_task.id),
+                    "status": latest_task.status,
+                    "scope_key": latest_task.scope_key,
+                }
+
         # 构建查询
         query = db.query(Account)
 
@@ -239,6 +258,12 @@ async def list_accounts(
         # 统计总数
         total = query.count()
 
+        if refresh_task_id is not None:
+            task = db.query(BatchSubscriptionTask).filter(BatchSubscriptionTask.id == refresh_task_id).first()
+            if task is not None and task.status == "completed":
+                request_payload = task.request_payload or {}
+                refreshed_account_ids = [int(account_id) for account_id in request_payload.get("ids", []) if isinstance(account_id, int) or str(account_id).isdigit()]
+
         # 分页
         offset = (page - 1) * page_size
         accounts = query.order_by(Account.created_at.desc()).offset(offset).limit(page_size).all()
@@ -246,7 +271,9 @@ async def list_accounts(
 
         return AccountListResponse(
             total=total,
-            accounts=[account_to_list_response(acc, workbench_summaries.get(acc.id)) for acc in accounts]
+            accounts=[account_to_list_response(acc, workbench_summaries.get(acc.id)) for acc in accounts],
+            refreshed_account_ids=refreshed_account_ids,
+            latest_batch_check_task=latest_batch_check_task,
         )
 
 

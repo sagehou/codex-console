@@ -3,14 +3,64 @@ SQLAlchemy ORM 模型定义
 """
 
 from datetime import datetime
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import json
+import re
 from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy import event
 from sqlalchemy.types import TypeDecorator
 from sqlalchemy.orm import relationship
 
 Base = declarative_base()
+
+TEMP_MAIL_DOMAIN_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
+
+
+def normalize_temp_mail_config(config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if config is None:
+        return None
+
+    normalized_config = dict(config)
+    raw_domains = normalized_config.get("domains")
+    raw_domain = normalized_config.get("domain")
+
+    source_values: List[Any] = []
+    if isinstance(raw_domains, list) and raw_domains:
+        source_values = raw_domains
+    elif isinstance(raw_domains, str) and raw_domains.strip():
+        source_values = raw_domains.split(",")
+    elif isinstance(raw_domain, list) and raw_domain:
+        source_values = raw_domain
+    elif raw_domain is not None:
+        source_values = str(raw_domain).split(",")
+
+    if not source_values:
+        return normalized_config
+
+    normalized_domains: List[str] = []
+    seen_domains = set()
+
+    for raw_value in source_values:
+        candidate = str(raw_value or "").strip().lstrip("@").strip()
+        if not candidate:
+            continue
+        try:
+            candidate.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"TempMail 域名项无效: {candidate}") from exc
+        if " " in candidate or "." not in candidate or not TEMP_MAIL_DOMAIN_PATTERN.fullmatch(candidate):
+            raise ValueError(f"TempMail 域名项无效: {candidate}")
+        if candidate not in seen_domains:
+            seen_domains.add(candidate)
+            normalized_domains.append(candidate)
+
+    if not normalized_domains:
+        raise ValueError("TempMail 域名列表为空 (empty after normalization)")
+
+    normalized_config["domains"] = normalized_domains
+    normalized_config["domain"] = ",".join(normalized_domains)
+    return normalized_config
 
 class JSONEncodedDict(TypeDecorator):
     """JSON 编码字典类型"""
@@ -102,6 +152,13 @@ class EmailService(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+@event.listens_for(EmailService, "before_insert")
+@event.listens_for(EmailService, "before_update")
+def _normalize_temp_mail_email_service_config(mapper, connection, target) -> None:
+    if target.service_type == "temp_mail":
+        target.config = normalize_temp_mail_config(target.config)
+
+
 class RegistrationTask(Base):
     """注册任务表"""
     __tablename__ = 'registration_tasks'
@@ -120,6 +177,42 @@ class RegistrationTask(Base):
 
     # 关系
     email_service = relationship('EmailService')
+
+
+class BatchSubscriptionTask(Base):
+    """批量检测订阅任务表"""
+    __tablename__ = 'batch_subscription_tasks'
+    __table_args__ = (
+        UniqueConstraint('owner_key', 'active_scope_key', name='uq_batch_subscription_tasks_owner_active_scope'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_type = Column(String(50), nullable=False, default='batch_subscription_check', index=True)
+    owner_key = Column(String(255), nullable=False, index=True)
+    session_id = Column(String(255), index=True)
+    scope_key = Column(String(64), nullable=False, index=True)
+    active_scope_key = Column(String(64), index=True)
+    status = Column(String(20), nullable=False, default='queued', index=True)
+    proxy = Column(String(255))
+    total_count = Column(Integer, nullable=False, default=0)
+    processed_count = Column(Integer, nullable=False, default=0)
+    success_count = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    current_account = Column(String(255))
+    request_payload = Column(JSONEncodedDict)
+    recent_logs = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def get_recent_log_lines(self) -> List[str]:
+        if not self.recent_logs:
+            return []
+        return self.recent_logs.splitlines()
+
+    def set_recent_log_lines(self, lines: List[str]) -> None:
+        self.recent_logs = "\n".join(lines)
 
 
 class Setting(Base):
@@ -374,6 +467,9 @@ class MaintenanceRun(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     environment_id = Column(Integer, ForeignKey('cliproxy_environments.id'), index=True)
     run_type = Column(String(32), nullable=False)
+    owner_session_id = Column(String(255), index=True)
+    aggregate_scope_key = Column(String(255), index=True)
+    aggregate_kind = Column(String(32), index=True)
     status = Column(String(20), nullable=False, default='pending')
     started_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)

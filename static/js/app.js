@@ -39,7 +39,7 @@ let activeBatchId = null;    // 当前活跃的批量任务 ID（用于页面重
 // DOM 元素
 const elements = {
     form: document.getElementById('registration-form'),
-    emailService: document.getElementById('email-service'),
+    emailService: document.getElementById('registration-email-service'),
     regMode: document.getElementById('reg-mode'),
     regModeGroup: document.getElementById('reg-mode-group'),
     batchCountGroup: document.getElementById('batch-count-group'),

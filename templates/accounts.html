@@ -50,6 +50,12 @@
             gap: 12px;
             min-width: 0;
         }
+        .primary-column-contract {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 8px;
+        }
         .accounts-list-meta {
             display: flex;
             flex-direction: column;
@@ -73,7 +79,7 @@
         }
         .account-row-card {
             display: grid;
-            grid-template-columns: auto minmax(0, 1.4fr) minmax(200px, 1fr) auto;
+            grid-template-columns: auto minmax(0, 1.7fr) auto;
             gap: 14px;
             align-items: start;
             padding: 16px;
@@ -96,7 +102,7 @@
             gap: 10px;
         }
         .account-title-row,
-        .account-summary-grid,
+        .account-primary-columns,
         .account-status-row,
         .detail-topline,
         .detail-chip-row,
@@ -109,6 +115,11 @@
         }
         .account-title-row {
             align-items: center;
+        }
+        .account-primary-columns {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 8px;
         }
         .account-email-button {
             border: none;
@@ -140,11 +151,6 @@
         .detail-chip strong {
             color: var(--text-primary);
             font-weight: 600;
-        }
-        .account-supporting {
-            min-width: 0;
-            display: grid;
-            gap: 10px;
         }
         .micro-panel,
         .detail-layer-card {
@@ -188,6 +194,78 @@
         }
         .floating-bulk-bar.is-visible {
             display: flex;
+        }
+        .batch-task-panel {
+            display: none;
+            flex-direction: column;
+            gap: 14px;
+            padding: 16px 18px;
+            border: 1px solid color-mix(in srgb, var(--primary) 18%, var(--border) 82%);
+            border-radius: 18px;
+            background: linear-gradient(180deg, color-mix(in srgb, var(--primary-light, #dbeafe) 28%, var(--surface) 72%) 0%, var(--surface) 100%);
+            box-shadow: 0 12px 30px rgba(15, 23, 42, 0.08);
+        }
+        .batch-task-panel.is-visible {
+            display: flex;
+        }
+        .batch-task-panel-header,
+        .batch-task-summary,
+        .batch-task-current {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+        }
+        .batch-task-panel-header h4,
+        .batch-task-log-shell h5 {
+            margin: 0;
+            font-size: 0.95rem;
+        }
+        .batch-task-panel-header p,
+        .batch-task-current span,
+        .batch-task-summary span,
+        .batch-task-log-empty {
+            margin: 0;
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+        .batch-task-summary {
+            justify-content: flex-start;
+        }
+        .batch-task-progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--surface-hover) 78%, var(--border) 22%);
+            overflow: hidden;
+        }
+        .batch-task-progress-fill {
+            width: 0%;
+            height: 100%;
+            border-radius: inherit;
+            background: linear-gradient(90deg, var(--primary) 0%, color-mix(in srgb, var(--primary) 65%, #ffffff 35%) 100%);
+            transition: width 0.2s ease;
+        }
+        .batch-task-log-shell {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .batch-task-log-list {
+            margin: 0;
+            padding: 12px 16px;
+            list-style: decimal;
+            border-radius: 14px;
+            border: 1px solid var(--border);
+            background: color-mix(in srgb, var(--surface) 85%, var(--background) 15%);
+            max-height: 220px;
+            overflow-y: auto;
+            color: var(--text-secondary);
+            font-size: 0.78rem;
+        }
+        .batch-task-log-list li + li {
+            margin-top: 6px;
         }
         .bulk-bar-summary {
             display: flex;
@@ -302,9 +380,11 @@
             .account-row-card {
                 grid-template-columns: auto 1fr;
             }
-            .account-actions,
-            .account-supporting {
+            .account-actions {
                 grid-column: 1 / -1;
+            }
+            .account-primary-columns {
+                grid-template-columns: 1fr;
             }
             .floating-bulk-bar {
                 flex-direction: column;
@@ -403,13 +483,54 @@
                         </div>
                     </div>
                 </div>
+                <section
+                    id="batch-check-task-panel"
+                    class="batch-task-panel"
+                    data-task-panel="batch-subscription-check"
+                    aria-live="polite"
+                    hidden
+                >
+                    <div class="batch-task-panel-header">
+                        <div>
+                            <h4>批量检测订阅任务</h4>
+                            <p>显示后台任务进度、当前账号和滚动日志，页面刷新后可自动恢复。</p>
+                        </div>
+                        <span id="batch-check-task-status" class="summary-pill"><strong>idle</strong><span>task status</span></span>
+                    </div>
+                    <div id="batch-check-task-summary" class="batch-task-summary">
+                        <span class="summary-pill"><strong id="batch-check-task-total-count">0</strong><span>total</span></span>
+                        <span class="summary-pill"><strong id="batch-check-task-processed-count">0</strong><span>processed</span></span>
+                        <span class="summary-pill"><strong id="batch-check-task-success-count">0</strong><span>success</span></span>
+                        <span class="summary-pill"><strong id="batch-check-task-failure-count">0</strong><span>failed</span></span>
+                        <span class="summary-pill"><strong id="batch-check-task-progress-text">0%</strong><span>progress</span></span>
+                    </div>
+                    <div class="batch-task-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                        <div id="batch-check-task-progress-bar" class="batch-task-progress-fill"></div>
+                    </div>
+                    <div id="batch-check-task-current-account" class="batch-task-current">
+                        <span>当前账号</span>
+                        <strong id="batch-check-task-current-account-value">等待任务开始</strong>
+                    </div>
+                    <div class="batch-task-log-shell">
+                        <h5>任务日志</h5>
+                        <p id="batch-check-task-log-empty" class="batch-task-log-empty">暂无日志，开始后会持续追加。</p>
+                        <ol id="batch-check-task-log-list" class="batch-task-log-list"></ol>
+                    </div>
+                </section>
                 <div class="card accounts-list-shell">
                     <div class="accounts-list-header">
                         <div class="accounts-list-header-main">
                             <input type="checkbox" id="select-all" aria-label="全选当前页">
                             <div class="accounts-list-meta">
                                 <h3>账号工作台主列表</h3>
-                                <p>展示平台来源、订阅/额度、风险状态、最近活动和远程维护摘要。</p>
+                                <p>首屏仅保留邮箱、状态、订阅、最近活动、source/target 摘要和批量操作，低频字段进入右侧详情。</p>
+                                <div id="accounts-list-primary-columns" class="primary-column-contract" data-primary-column-count="5" aria-label="accounts primary columns contract">
+                                    <span class="summary-pill" data-primary-column="email"><strong>email</strong><span>primary</span></span>
+                                    <span class="summary-pill" data-primary-column="status"><strong>status</strong><span>primary</span></span>
+                                    <span class="summary-pill" data-primary-column="subscription"><strong>subscription</strong><span>primary</span></span>
+                                    <span class="summary-pill" data-primary-column="recent-activity"><strong>recent activity</strong><span>primary</span></span>
+                                    <span class="summary-pill" data-primary-column="source-target"><strong>source / target</strong><span>primary</span></span>
+                                </div>
                             </div>
                         </div>
                         <div class="summary-pill"><strong id="list-page-summary">第 1 页</strong><span>保持当前批量流程可用</span></div>
@@ -467,6 +588,20 @@
                         </div>
                         <button class="btn btn-ghost btn-sm" id="close-modal">清空</button>
                     </div>
+
+                    <section id="account-secondary-detail-region" class="detail-layer-card" aria-label="secondary detail region">
+                        <h4>低频字段收纳区</h4>
+                        <div class="detail-chip-row">
+                            <span class="detail-chip" data-detail-only-field="account-id"><strong>account id</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="email-service"><strong>email service</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="workspace-id"><strong>workspace</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="password"><strong>password</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="remote-environment"><strong>environment</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="upload-target"><strong>upload target</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="remote-file"><strong>remote file</strong><span>detail only</span></span>
+                            <span class="detail-chip" data-detail-only-field="probe-status"><strong>probe</strong><span>detail only</span></span>
+                        </div>
+                    </section>
 
                     <section class="detail-layer-card" data-detail-layer="subscription-quota">
                         <h4>订阅与额度优先层</h4>
