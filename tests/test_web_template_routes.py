@@ -295,6 +295,9 @@ def test_cpa_workbench_route_has_layout_skeleton_regions(monkeypatch, tmp_path):
     assert 'id="cpa-active-task-region"' in response.text
     assert 'id="cpa-credential-list-region"' in response.text
     assert 'id="cpa-detail-layer-stack"' in response.text
+    assert 'id="cpa-bulk-test-connection-btn"' in response.text
+    assert 'id="cpa-bulk-scan-btn"' in response.text
+    assert 'id="cpa-bulk-action-btn"' in response.text
     assert 'data-detail-layer="credential-identity"' in response.text
     assert 'data-detail-layer="credential-core-status"' in response.text
     assert 'data-detail-layer="credential-quick-actions"' in response.text

@@ -2,6 +2,9 @@ const cpaWorkbenchElements = {
     selector: document.getElementById('cpa-service-selector'),
     selectorList: document.getElementById('cpa-service-selector-list'),
     selectedServiceCount: document.getElementById('cpa-selected-service-count'),
+    bulkTestConnectionBtn: document.getElementById('cpa-bulk-test-connection-btn'),
+    bulkScanBtn: document.getElementById('cpa-bulk-scan-btn'),
+    bulkActionBtn: document.getElementById('cpa-bulk-action-btn'),
     statsRegion: document.getElementById('cpa-stats-region'),
     listRegion: document.getElementById('cpa-credential-list-region'),
     credentialTableBody: document.getElementById('cpa-credential-table-body'),
@@ -91,6 +94,7 @@ function renderServiceSelector() {
     selectorList.querySelectorAll('input[type="checkbox"][data-service-id]').forEach((input) => {
         input.addEventListener('change', handleSelectorChange);
     });
+    updatePrimaryActionBarState();
 }
 
 function buildCredentialKey(serviceId, credentialId) {
@@ -123,7 +127,72 @@ async function handleSelectorChange() {
 
     cpaWorkbenchState.selectedServiceIds = nextSelectedIds;
     cpaWorkbenchElements.selectedServiceCount.textContent = String(nextSelectedIds.length);
+    updatePrimaryActionBarState();
     await reloadWorkbenchScope();
+}
+
+function updatePrimaryActionBarState() {
+    const hasSelection = cpaWorkbenchState.selectedServiceIds.length > 0;
+    if (cpaWorkbenchElements.bulkTestConnectionBtn) {
+        cpaWorkbenchElements.bulkTestConnectionBtn.disabled = !hasSelection;
+        cpaWorkbenchElements.bulkTestConnectionBtn.onclick = hasSelection ? () => handleBulkTestConnection() : null;
+    }
+    if (cpaWorkbenchElements.bulkScanBtn) {
+        cpaWorkbenchElements.bulkScanBtn.disabled = !hasSelection;
+        cpaWorkbenchElements.bulkScanBtn.onclick = hasSelection ? () => handleBulkScan() : null;
+    }
+    if (cpaWorkbenchElements.bulkActionBtn) {
+        cpaWorkbenchElements.bulkActionBtn.disabled = !hasSelection;
+        cpaWorkbenchElements.bulkActionBtn.onclick = hasSelection ? () => handleBulkAction() : null;
+    }
+}
+
+async function handleBulkTestConnection() {
+    await submitCpaJsonAction('/api/cpa/test-connection', {
+        service_ids: cpaWorkbenchState.selectedServiceIds
+    });
+}
+
+async function handleBulkScan() {
+    await submitCpaJsonAction('/api/cpa/scan', {
+        service_ids: cpaWorkbenchState.selectedServiceIds
+    });
+    await refreshActiveTaskPanel();
+}
+
+async function handleBulkAction() {
+    await submitCpaJsonAction('/api/cpa/actions', {
+        service_ids: cpaWorkbenchState.selectedServiceIds
+    });
+    await refreshActiveTaskPanel();
+}
+
+async function submitCpaJsonAction(url, payload) {
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(payload),
+        credentials: 'same-origin'
+    });
+
+    if (!response.ok) {
+        let message = `Request failed: ${response.status}`;
+        try {
+            const payload = await response.json();
+            if (payload?.detail?.message) {
+                message = payload.detail.message;
+            } else if (typeof payload?.detail === 'string') {
+                message = payload.detail;
+            }
+        } catch (_) {
+            // ignore parse failures
+        }
+        throw new Error(message);
+    }
+
+    return response.json();
 }
 
 async function reloadWorkbenchScope() {
