@@ -9,6 +9,7 @@ import time
 import json
 import random
 import logging
+import string
 from datetime import datetime, timezone
 from email import message_from_string
 from email.header import decode_header, make_header
@@ -167,6 +168,19 @@ class TempMailService(BaseEmailService):
             "raw": raw,
         }
 
+    def _mail_search_content(self, mail: Dict[str, Any]) -> Tuple[str, str, str, str]:
+        parsed = self._extract_mail_fields(mail)
+        sender = parsed["sender"]
+        subject = parsed["subject"]
+        raw = parsed["raw"]
+        if raw:
+            body = ""
+            content = "\n".join(part for part in (sender, subject, raw) if part).strip()
+        else:
+            body = parsed["body"]
+            content = "\n".join(part for part in (sender, subject, body) if part).strip()
+        return sender, subject, body, content
+
     def _is_openai_otp_mail(self, sender: str, subject: str, body: str, raw: str) -> bool:
         """
         判断是否是 OpenAI 验证码邮件。
@@ -301,69 +315,21 @@ class TempMailService(BaseEmailService):
 
     def _fetch_mails_once(self, email: str, jwt: Optional[str], email_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        获取一次邮件列表，按新旧接口顺序回退:
-        1) /api/mails (Bearer jwt)
-        2) /user_api/mails (x-user-token)
-        3) /admin/mails (按地址过滤)
-        4) /admin/mails (不过滤，客户端二次筛选)
+        获取一次邮件列表，仅使用上游锁定的 /api/mails 合约。
         """
-        attempts: List[Dict[str, Any]] = []
-        if jwt:
-            attempts.extend([
-                {
-                    "path": "/api/mails",
-                    "params": {"limit": 50, "offset": 0},
-                    "headers": {
-                        "Authorization": f"Bearer {jwt}",
-                        "Accept": "application/json",
-                    },
-                },
-                {
-                    "path": "/user_api/mails",
-                    "params": {"limit": 50, "offset": 0},
-                    "headers": {
-                        "x-user-token": jwt,
-                        "Accept": "application/json",
-                    },
-                },
-            ])
+        if not jwt:
+            raise EmailServiceError("TempMail address JWT is required to read /api/mails")
 
-        attempts.append({
-            "path": "/admin/mails",
-            "params": {"limit": 80, "offset": 0, "address": email},
-            "headers": {"Accept": "application/json"},
-        })
-        if email_id and email_id != email:
-            attempts.append({
-                "path": "/admin/mails",
-                "params": {"limit": 80, "offset": 0, "address": email_id},
-                "headers": {"Accept": "application/json"},
-            })
-        attempts.append({
-            "path": "/admin/mails",
-            "params": {"limit": 120, "offset": 0},
-            "headers": {"Accept": "application/json"},
-        })
-
-        for attempt in attempts:
-            path = attempt["path"]
-            try:
-                response = self._make_request(
-                    "GET",
-                    path,
-                    params=attempt["params"],
-                    headers=attempt["headers"],
-                )
-                mails = self._extract_mails_from_response(response)
-                if mails and "address" not in attempt["params"]:
-                    mails = [mail for mail in mails if self._mail_appears_for_email(mail, email)]
-                if mails:
-                    return mails
-                logger.debug(f"TempMail 接口 {path} 返回无可用邮件列表: {response}")
-            except Exception as e:
-                logger.debug(f"TempMail 接口 {path} 读取失败，尝试回退: {e}")
-
-        return []
+        response = self._make_request(
+            "GET",
+            "/api/mails",
+            params={"limit": 20, "offset": 0},
+            headers={
+                "Authorization": f"Bearer {jwt}",
+                "Accept": "application/json",
+            },
+        )
+        return self._extract_mails_from_response(response)
 
     def _extract_mail_detail_from_response(self, response: Any) -> Optional[Dict[str, Any]]:
         """从详情接口响应里提取单封邮件对象。"""
@@ -534,6 +500,31 @@ class TempMailService(BaseEmailService):
             response = self.http_client.request(method, url, **kwargs)
 
             if response.status_code >= 400:
+                status_code = int(response.status_code)
+                if status_code in (401, 403):
+                    custom_auth = str(kwargs.get("headers", {}).get("x-custom-auth") or "").strip()
+                    if custom_auth:
+                        error_blob = ""
+                        try:
+                            error_blob = json.dumps(response.json(), ensure_ascii=False)
+                        except Exception:
+                            error_blob = str(response.text or "")
+                        error_blob_l = error_blob.lower()
+                        stronger_auth_signals = (
+                            "bearer",
+                            "jwt",
+                            "token",
+                            "expired",
+                            "invalid authorization",
+                            "missing authorization",
+                        )
+                        if not any(signal in error_blob_l for signal in stronger_auth_signals):
+                            msg = (
+                                f"请求失败: {status_code} - TempMail site_password misconfiguration: "
+                                "x-custom-auth was rejected"
+                            )
+                            self.update_status(False, EmailServiceError(msg))
+                            raise EmailServiceError(msg)
                 error_msg = f"请求失败: {response.status_code}"
                 try:
                     error_data = response.json()
@@ -564,8 +555,6 @@ class TempMailService(BaseEmailService):
             - jwt: 用户级 JWT token
             - service_id: 同 email（用作标识）
         """
-        import string
-
         # 生成随机邮箱名
         letters = ''.join(random.choices(string.ascii_lowercase, k=5))
         digits = ''.join(random.choices(string.digits, k=random.randint(1, 3)))
@@ -576,9 +565,9 @@ class TempMailService(BaseEmailService):
         enable_prefix = self.config.get("enable_prefix", True)
 
         body = {
-            "enablePrefix": enable_prefix,
             "name": name,
             "domain": domain,
+            "enablePrefix": bool(enable_prefix),
         }
 
         try:
@@ -586,6 +575,7 @@ class TempMailService(BaseEmailService):
 
             address = response.get("address", "").strip()
             jwt = response.get("jwt", "").strip()
+            password = str(response.get("password") or "").strip()
             address_id = str(
                 response.get("address_id")
                 or response.get("id")
@@ -593,12 +583,13 @@ class TempMailService(BaseEmailService):
                 or ""
             ).strip()
 
-            if not address:
+            if not address or not password or not jwt:
                 raise EmailServiceError(f"API 返回数据不完整: {response}")
 
             email_info = {
                 "email": address,
                 "jwt": jwt,
+                "password": password,
                 "address_id": address_id,
                 "service_id": address,
                 "id": address,
@@ -617,6 +608,38 @@ class TempMailService(BaseEmailService):
             if isinstance(e, EmailServiceError):
                 raise
             raise EmailServiceError(f"创建邮箱失败: {e}")
+
+    def _login_address(self, email: str, password: str) -> Dict[str, Any]:
+        email = str(email or "").strip()
+        password = str(password or "").strip()
+        if not email or not password:
+            raise EmailServiceError("address login requires non-empty email and password")
+
+        response = self._make_request(
+            "POST",
+            "/api/address_login",
+            json={
+                "email": email,
+                "password": password,
+            },
+        )
+        jwt = str(response.get("jwt") or "").strip()
+        address = str(response.get("address") or email).strip()
+        if not jwt or not address:
+            raise EmailServiceError(f"TempMail address login returned incomplete data: {response}")
+
+        cached = self._email_cache.get(address, {}).copy()
+        cached.update({
+            "email": address,
+            "jwt": jwt,
+            "password": password,
+        })
+        self._email_cache[address] = cached
+        if address != email:
+            alias_cached = self._email_cache.get(email, {}).copy()
+            alias_cached.update(cached)
+            self._email_cache[email] = alias_cached
+        return cached
 
     def get_verification_code(
         self,
@@ -646,14 +669,18 @@ class TempMailService(BaseEmailService):
         last_used_mail_id = self._last_used_mail_ids.get(email)
         unknown_ts_grace_seconds = 15
 
-        # 优先使用用户级 JWT，回退到 admin API
+        # 优先使用地址级 JWT；若缓存缺失则尝试地址密码登录刷新 JWT。
         cached = self._email_cache.get(email, {})
-        jwt = cached.get("jwt")
+        jwt = str(cached.get("jwt") or "").strip() or None
+        password = str(cached.get("password") or "").strip()
         address_id = (
             str(cached.get("address_id") or "").strip()
             or str(email_id or "").strip()
             or None
         )
+        if not jwt and password:
+            login_info = self._login_address(email, password)
+            jwt = str(login_info.get("jwt") or "").strip() or None
         poll_count = 0
 
         while time.time() - start_time < timeout:
@@ -692,40 +719,15 @@ class TempMailService(BaseEmailService):
                         if mail_ts is not None and mail_ts + 2 < otp_sent_at:
                             continue
 
-                    parsed = self._extract_mail_fields(mail)
-                    sender = parsed["sender"].lower()
-                    subject = parsed["subject"]
-                    body_text = parsed["body"]
-                    raw_text = parsed["raw"]
-                    content = f"{sender}\n{subject}\n{body_text}\n{raw_text}".strip()
+                    sender, subject, body_text, content = self._mail_search_content(mail)
+                    sender_l = sender.lower()
+                    raw_text = str(self._extract_mail_fields(mail)["raw"])
 
                     # 只处理 OpenAI 验证码类邮件（避免误命中通知类邮件）
-                    if not self._is_openai_otp_mail(sender, subject, body_text, raw_text):
+                    if not self._is_openai_otp_mail(sender_l, subject, body_text, raw_text):
                         continue
 
                     code, semantic_hit = self._extract_otp_code(content, pattern)
-                    if not code:
-                        # 部分部署列表接口只含摘要；尝试拉单封详情再匹配一次。
-                        detail = self._fetch_mail_detail(mail_id=mail_id, jwt=jwt)
-                        if detail:
-                            detail_parsed = self._extract_mail_fields(detail)
-                            detail_ts = self._extract_mail_timestamp(detail)
-                            if detail_ts is not None:
-                                mail_ts = detail_ts
-                            detail_content = (
-                                f"{detail_parsed['sender']}\n"
-                                f"{detail_parsed['subject']}\n"
-                                f"{detail_parsed['body']}\n"
-                                f"{detail_parsed['raw']}"
-                            ).strip()
-                            if not self._is_openai_otp_mail(
-                                detail_parsed["sender"],
-                                detail_parsed["subject"],
-                                detail_parsed["body"],
-                                detail_parsed["raw"],
-                            ):
-                                continue
-                            code, semantic_hit = self._extract_otp_code(detail_content, pattern)
 
                     if not code:
                         continue
@@ -785,6 +787,8 @@ class TempMailService(BaseEmailService):
                     return code
 
             except Exception as e:
+                if isinstance(e, EmailServiceError):
+                    raise
                 logger.debug(f"检查 TempMail 邮件时出错: {e}")
 
             time.sleep(3)
