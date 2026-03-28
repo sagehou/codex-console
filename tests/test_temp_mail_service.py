@@ -30,6 +30,59 @@ class FakeHTTPClient:
         return self.responses.pop(0)
 
 
+def test_default_headers_omit_x_custom_auth_when_site_password_blank():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "site_password": "",
+    })
+
+    assert "x-custom-auth" not in service._default_headers()
+
+
+def test_parse_domains_normalizes_comma_separated_values():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": " a.com, b.com ,, c.com ",
+    })
+
+    assert service.config["domain"] == "a.com,b.com,c.com"
+    assert service._get_domains() == ["a.com", "b.com", "c.com"]
+
+
+def test_create_email_uses_random_choice_from_normalized_domains(monkeypatch):
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "a.com, b.com",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(payload={"address": "tester@b.com", "jwt": "jwt-123"}),
+    ])
+    service.http_client = fake_client
+
+    monkeypatch.setattr("src.services.temp_mail.random.choice", lambda values: "b.com")
+
+    result = service.create_email()
+
+    assert result["email"] == "tester@b.com"
+    create_call = fake_client.calls[0]
+    assert create_call["kwargs"]["json"]["domain"] == "b.com"
+
+
+def test_init_rejects_empty_domain_list_after_normalization():
+    import pytest
+
+    with pytest.raises(ValueError):
+        TempMailService({
+            "base_url": "https://mail.example.com",
+            "admin_password": "admin-secret",
+            "domain": " , , ",
+        })
+
+
 def test_get_verification_code_fallbacks_to_admin_when_user_endpoints_fail():
     service = TempMailService({
         "base_url": "https://mail.example.com",

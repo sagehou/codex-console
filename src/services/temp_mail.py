@@ -7,6 +7,7 @@ Temp-Mail 邮箱服务实现
 import re
 import time
 import json
+import random
 import logging
 from datetime import datetime, timezone
 from email import message_from_string
@@ -61,6 +62,7 @@ class TempMailService(BaseEmailService):
             "max_retries": 3,
         }
         self.config = {**default_config, **(config or {})}
+        self.config["domain"] = ",".join(self._normalize_domains(self.config.get("domain")))
 
         # 不走代理，proxy_url=None
         http_config = RequestConfig(
@@ -212,17 +214,35 @@ class TempMailService(BaseEmailService):
 
         return None, False
 
-    def _admin_headers(self) -> Dict[str, str]:
-        """构造 admin 请求头"""
+    def _normalize_domains(self, domain_value: Any) -> List[str]:
+        raw = str(domain_value or "")
+        domains = [part.strip() for part in raw.split(",")]
+        domains = [domain for domain in domains if domain]
+        if not domains:
+            raise ValueError("TempMail 至少需要一个有效域名")
+        return domains
+
+    def _get_domains(self) -> List[str]:
+        return self._normalize_domains(self.config.get("domain"))
+
+    def _choose_domain(self) -> str:
+        return random.choice(self._get_domains())
+
+    def _default_headers(self) -> Dict[str, str]:
+        """构造默认请求头"""
         headers = {
             "x-admin-auth": self.config["admin_password"],
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        custom_auth = (self.config.get("custom_auth") or "").strip()
+        custom_auth = (self.config.get("site_password") or self.config.get("custom_auth") or "").strip()
         if custom_auth:
             headers["x-custom-auth"] = custom_auth
         return headers
+
+    def _admin_headers(self) -> Dict[str, str]:
+        """兼容旧调用，转发到默认请求头。"""
+        return self._default_headers()
 
     def _extract_mails_from_response(self, response: Any) -> List[Dict[str, Any]]:
         """
@@ -507,7 +527,7 @@ class TempMailService(BaseEmailService):
 
         # 合并默认 admin headers
         kwargs.setdefault("headers", {})
-        for k, v in self._admin_headers().items():
+        for k, v in self._default_headers().items():
             kwargs["headers"].setdefault(k, v)
 
         try:
@@ -544,7 +564,6 @@ class TempMailService(BaseEmailService):
             - jwt: 用户级 JWT token
             - service_id: 同 email（用作标识）
         """
-        import random
         import string
 
         # 生成随机邮箱名
@@ -553,7 +572,7 @@ class TempMailService(BaseEmailService):
         suffix = ''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
         name = letters + digits + suffix
 
-        domain = self.config["domain"]
+        domain = self._choose_domain()
         enable_prefix = self.config.get("enable_prefix", True)
 
         body = {
