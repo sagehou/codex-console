@@ -210,3 +210,24 @@ def test_get_email_service_full_hides_temp_mail_secrets_with_presence_flags(monk
     assert result["config"]["has_site_password"] is True
     assert "admin_password" not in result["config"]
     assert "site_password" not in result["config"]
+
+
+def test_get_email_service_full_treats_legacy_custom_auth_as_site_password_presence(monkeypatch):
+    manager = make_test_db(monkeypatch, "temp_mail_full_legacy_custom_auth_routes.db")
+    temp_mail_service = create_temp_mail_service(manager)
+
+    with manager.session_scope() as session:
+        service = session.query(EmailService).filter(EmailService.id == temp_mail_service.id).first()
+        service.config = {
+            "base_url": "https://mail.example.com",
+            "admin_password": "admin-secret",
+            "domain": "old.com",
+            "custom_auth": "legacy-secret",
+            "enable_prefix": True,
+        }
+
+    result = asyncio.run(email_routes.get_email_service_full(temp_mail_service.id))
+
+    assert result["config"]["has_site_password"] is True
+    assert "site_password" not in result["config"]
+    assert "custom_auth" not in result["config"]

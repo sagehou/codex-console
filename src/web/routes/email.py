@@ -117,6 +117,9 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     if config.get('client_id') and config.get('refresh_token'):
         filtered['has_oauth'] = True
 
+    if config.get('custom_auth') and 'has_site_password' not in filtered:
+        filtered['has_site_password'] = True
+
     return filtered
 
 
