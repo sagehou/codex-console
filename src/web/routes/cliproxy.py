@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from ...database import crud
 from ...database.models import MaintenanceActionLog, MaintenanceRun, RemoteAuthInventory
 from ...database.session import get_db
-from ...core.cliproxy.secrets import encrypt_cliproxy_token
+from ...core.cliproxy import secrets as cliproxy_secrets
 from ...core.cliproxy.client import CLIProxyAPIClient
 from ...core.cliproxy.maintenance import CLIProxyMaintenanceEngine
 from ...core.tasks.cliproxy_aggregate import run_cliproxy_aggregate_task
@@ -271,7 +271,7 @@ def _build_aggregate_service_payloads(db, service_ids: List[int]) -> List[Dict[s
     for service_id in crud.normalize_cliproxy_service_ids(service_ids):
         service = _get_ready_cpa_service_or_raise(db, service_id)
         try:
-            encrypt_cliproxy_token(service.api_token)
+            cliproxy_secrets.encrypt_cliproxy_token(service.api_token)
         except ValueError as exc:
             _raise_invalid_cliproxy_encryption_key(exc)
         services.append(
@@ -358,7 +358,7 @@ def _create_or_replay_cpa_service_run(service_id: int, run_type: str, request_da
     with get_db() as db:
         service = _get_ready_cpa_service_or_raise(db, service_id)
         try:
-            encrypt_cliproxy_token(service.api_token)
+            cliproxy_secrets.encrypt_cliproxy_token(service.api_token)
         except ValueError as exc:
             _raise_invalid_cliproxy_encryption_key(exc)
         environment = crud.ensure_cliproxy_environment_for_cpa_service(db, service)

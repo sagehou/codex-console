@@ -1,6 +1,13 @@
 """CLIProxyAPI token secret helpers."""
 
-from cryptography.fernet import Fernet, InvalidToken
+try:
+    from cryptography.fernet import Fernet, InvalidToken
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised in deployment/runtime
+    Fernet = None  # type: ignore[assignment]
+    InvalidToken = ValueError  # type: ignore[assignment]
+    _CRYPTO_IMPORT_ERROR = exc
+else:
+    _CRYPTO_IMPORT_ERROR = None
 
 from ...config.settings import (
     CLIPROXY_ENCRYPTION_KEY_PLACEHOLDER,
@@ -20,6 +27,8 @@ def _resolve_encryption_key(encryption_key: str | None = None) -> str:
 
 
 def _build_fernet(encryption_key: str | None = None) -> Fernet:
+    if Fernet is None:
+        raise ValueError("cryptography package is required for CLIProxy token encryption") from _CRYPTO_IMPORT_ERROR
     try:
         return Fernet(_resolve_encryption_key(encryption_key).encode("ascii"))
     except (ValueError, TypeError):

@@ -16,6 +16,38 @@ def make_fernet_key() -> str:
     return Fernet.generate_key().decode("ascii")
 
 
+def test_cliproxy_secrets_module_imports_without_cryptography(monkeypatch):
+    import importlib
+    import sys
+
+    original_module = sys.modules.get("src.core.cliproxy.secrets")
+    original_crypto = sys.modules.get("cryptography")
+    original_crypto_fernet = sys.modules.get("cryptography.fernet")
+    monkeypatch.setitem(sys.modules, "cryptography", None)
+    monkeypatch.setitem(sys.modules, "cryptography.fernet", None)
+    sys.modules.pop("src.core.cliproxy.secrets", None)
+
+    module = importlib.import_module("src.core.cliproxy.secrets")
+
+    with pytest.raises(ValueError, match="cryptography package is required"):
+        module.encrypt_cliproxy_token("secret", make_fernet_key())
+
+    sys.modules.pop("src.core.cliproxy.secrets", None)
+    if original_crypto is not None:
+        sys.modules["cryptography"] = original_crypto
+    else:
+        sys.modules.pop("cryptography", None)
+    if original_crypto_fernet is not None:
+        sys.modules["cryptography.fernet"] = original_crypto_fernet
+    else:
+        sys.modules.pop("cryptography.fernet", None)
+    if original_module is not None:
+        sys.modules["src.core.cliproxy.secrets"] = original_module
+        importlib.reload(original_module)
+    else:
+        importlib.import_module("src.core.cliproxy.secrets")
+
+
 def test_cliproxy_token_is_not_stored_in_plaintext(monkeypatch):
     runtime_dir = Path("tests_runtime")
     runtime_dir.mkdir(exist_ok=True)
