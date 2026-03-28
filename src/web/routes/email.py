@@ -96,6 +96,7 @@ SENSITIVE_FIELDS = {
     'access_token',
     'admin_token',
     'admin_password',
+    'site_password',
     'custom_auth',
 }
 
@@ -117,6 +118,37 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
         filtered['has_oauth'] = True
 
     return filtered
+
+
+def normalize_temp_mail_config(
+    config: Dict[str, Any],
+    existing_config: Optional[Dict[str, Any]] = None,
+    is_update: bool = False,
+) -> Dict[str, Any]:
+    """Normalize TempMail config while preserving site_password semantics."""
+    normalized = dict(existing_config or {}) if is_update else {}
+    incoming = dict(config or {})
+
+    if "domain" in incoming:
+        parts = [part.strip() for part in str(incoming.get("domain") or "").split(",")]
+        parts = [part for part in parts if part]
+        if not parts:
+            raise HTTPException(status_code=400, detail="TempMail 至少需要一个有效域名")
+        normalized["domain"] = ",".join(parts)
+
+    for key, value in incoming.items():
+        if key in {"domain", "site_password"}:
+            continue
+        normalized[key] = value
+
+    if "site_password" in incoming:
+        site_password = str(incoming["site_password"] or "")
+        if is_update:
+            normalized["site_password"] = site_password
+        elif site_password:
+            normalized["site_password"] = site_password
+
+    return normalized
 
 
 def service_to_response(service: EmailServiceModel) -> EmailServiceResponse:
@@ -267,8 +299,8 @@ async def get_service_types():
                 "config_fields": [
                     {"name": "base_url", "label": "Worker 地址", "required": True, "placeholder": "https://mail.example.com"},
                     {"name": "admin_password", "label": "Admin 密码", "required": True, "secret": True},
-                    {"name": "custom_auth", "label": "Custom Auth（可选）", "required": False, "secret": True},
-                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "example.com"},
+                    {"name": "site_password", "label": "Site Password（可选）", "required": False, "secret": True, "placeholder": "留空表示不配置 x-custom-auth"},
+                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "example.com, example.org", "help": "支持多个域名，创建地址时会随机选择一个"},
                     {"name": "enable_prefix", "label": "启用前缀", "required": False, "default": True},
                 ]
             },
@@ -381,7 +413,9 @@ async def create_email_service(request: EmailServiceCreate):
         service = EmailServiceModel(
             service_type=request.service_type,
             name=request.name,
-            config=request.config,
+            config=normalize_temp_mail_config(request.config)
+            if request.service_type == "temp_mail"
+            else request.config,
             enabled=request.enabled,
             priority=request.priority
         )
@@ -404,12 +438,17 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
         if request.name is not None:
             update_data["name"] = request.name
         if request.config is not None:
-            # 合并配置而不是替换
             current_config = service.config or {}
-            merged_config = {**current_config, **request.config}
-            # 移除空值
-            merged_config = {k: v for k, v in merged_config.items() if v}
-            update_data["config"] = merged_config
+            if service.service_type == "temp_mail":
+                update_data["config"] = normalize_temp_mail_config(
+                    request.config,
+                    existing_config=current_config,
+                    is_update=True,
+                )
+            else:
+                merged_config = {**current_config, **request.config}
+                merged_config = {k: v for k, v in merged_config.items() if v}
+                update_data["config"] = merged_config
         if request.enabled is not None:
             update_data["enabled"] = request.enabled
         if request.priority is not None:
