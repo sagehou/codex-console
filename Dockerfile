@@ -32,13 +32,16 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # 复制依赖文件并安装
-COPY requirements.txt .
+COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
     && pip install --no-cache-dir -r requirements.txt \
     && python -m playwright install --with-deps chromium
 
-# 复制项目代码
-COPY . .
+# 复制运行时所需文件
+COPY src/ /app/src/
+COPY static/ /app/static/
+COPY templates/ /app/templates/
+COPY webui.py /app/webui.py
 COPY scripts/docker/start-webui.sh /app/scripts/docker/start-webui.sh
 RUN chmod +x /app/scripts/docker/start-webui.sh
 
