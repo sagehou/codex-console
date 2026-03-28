@@ -16,7 +16,7 @@ from ...database.session import get_db
 from ...core.cliproxy.client import CLIProxyAPIClient
 from ...core.cliproxy.maintenance import CLIProxyMaintenanceEngine
 from ...core.tasks.cliproxy_aggregate import run_cliproxy_aggregate_task
-from ..auth import get_current_session_id, require_webui_auth
+from ..auth import build_session_cookie_value, ensure_session_id, get_current_session_id, require_webui_auth
 from ..task_manager import task_manager
 
 router = APIRouter()
@@ -289,6 +289,19 @@ def _get_current_session_id_or_raise(request: Request) -> str:
     session_id = get_current_session_id(request)
     if not session_id:
         raise HTTPException(status_code=401, detail="Session not established")
+    return session_id
+
+
+def _ensure_session_for_cliproxy(request: Request, response: Optional[Response] = None) -> str:
+    require_webui_auth(request)
+    session_id, reissued = ensure_session_id(request)
+    if reissued and response is not None:
+        response.set_cookie(
+            "session_id",
+            build_session_cookie_value(session_id),
+            httponly=True,
+            samesite="lax",
+        )
     return session_id
 
 
@@ -723,8 +736,7 @@ async def start_cliproxy_aggregate_scan(
     background_tasks: BackgroundTasks,
     response: Response,
 ):
-    require_webui_auth(http_request)
-    session_id = _get_current_session_id_or_raise(http_request)
+    session_id = _ensure_session_for_cliproxy(http_request, response)
     with get_db() as db:
         services = _build_aggregate_service_payloads(db, request.service_ids)
         try:
@@ -751,9 +763,8 @@ async def start_cliproxy_aggregate_scan(
     
 
 @router.get("/tasks/latest")
-async def get_latest_cliproxy_aggregate_task_for_scope(request: Request, type: str, services: str):
-    require_webui_auth(request)
-    session_id = _get_current_session_id_or_raise(request)
+async def get_latest_cliproxy_aggregate_task_for_scope(request: Request, response: Response, type: str, services: str):
+    session_id = _ensure_session_for_cliproxy(request, response)
     service_ids = [int(item) for item in services.split(",") if str(item).strip()]
     aggregate_scope_key = crud.build_cliproxy_aggregate_scope_key(run_type=type, service_ids=service_ids)
     with get_db() as db:
@@ -775,8 +786,7 @@ async def start_cliproxy_aggregate_maintain(
     background_tasks: BackgroundTasks,
     response: Response,
 ):
-    require_webui_auth(http_request)
-    session_id = _get_current_session_id_or_raise(http_request)
+    session_id = _ensure_session_for_cliproxy(http_request, response)
     with get_db() as db:
         services = _build_aggregate_service_payloads(db, request.service_ids)
         try:
@@ -802,9 +812,8 @@ async def start_cliproxy_aggregate_maintain(
 
 
 @router.get("/tasks/latest-active")
-async def get_latest_cliproxy_aggregate_task(request: Request):
-    require_webui_auth(request)
-    session_id = _get_current_session_id_or_raise(request)
+async def get_latest_cliproxy_aggregate_task(request: Request, response: Response):
+    session_id = _ensure_session_for_cliproxy(request, response)
     with get_db() as db:
         run = crud.get_latest_active_cliproxy_aggregate_task(db, owner_session_id=session_id)
         if run is None:
@@ -813,8 +822,8 @@ async def get_latest_cliproxy_aggregate_task(request: Request):
 
 
 @router.get("/tasks/{task_id}")
-async def get_cliproxy_aggregate_task_detail(request: Request, task_id: int):
-    require_webui_auth(request)
+async def get_cliproxy_aggregate_task_detail(request: Request, response: Response, task_id: int):
+    _ensure_session_for_cliproxy(request, response)
     run = _get_owned_cliproxy_task_or_404(request, task_id)
     return _serialize_cliproxy_task(run)
 

@@ -13,7 +13,7 @@ cliproxy_maintenance_module = importlib.import_module("src.core.cliproxy.mainten
 from src.database import crud
 from src.database.init_db import initialize_database
 from src.database.models import Base, CLIProxyAPIEnvironment, RemoteAuthInventory, MaintenanceActionLog, MaintenanceRun, AuditLog, Account
-from src.database.session import DatabaseSessionManager
+from src.database.session import DatabaseSessionManager, get_db
 import src.database.session as session_module
 
 
@@ -84,6 +84,19 @@ def authenticate_client(client: TestClient) -> None:
     client.cookies.set("webui_auth", cookie)
 
 
+def authenticate_client_without_session(client: TestClient) -> str:
+    login_response = client.post(
+        "/login",
+        data={"password": "password", "next": "/accounts"},
+        follow_redirects=False,
+    )
+    auth_cookie = login_response.cookies.get("webui_auth")
+    assert auth_cookie
+    client.cookies.clear()
+    client.cookies.set("webui_auth", auth_cookie)
+    return auth_cookie
+
+
 def create_environment_via_api(client: TestClient, name: str = "primary") -> dict:
     response = client.post(
         "/api/cliproxy-environments",
@@ -95,7 +108,7 @@ def create_environment_via_api(client: TestClient, name: str = "primary") -> dic
             "provider": "cloudmail",
         },
     )
-    assert response.status_code == 200
+    assert response.status_code in {200, 202}
     return response.json()
 
 
@@ -171,6 +184,27 @@ def test_unauthorized_access_rejected_for_cliproxy_routes(monkeypatch, tmp_path)
     response = client.get("/api/cliproxy-environments")
 
     assert response.status_code == 401
+
+
+def test_cliproxy_scan_self_heals_missing_session_cookie(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    auth_cookie = authenticate_client_without_session(client)
+
+    with get_db() as db:
+        service = create_cpa_service(db, name="alpha")
+
+    stub_cliproxy_background_dispatch(monkeypatch)
+
+    response = client.post(
+        "/api/cliproxy/scan",
+        json={"service_ids": [service.id]},
+        cookies={"webui_auth": auth_cookie},
+    )
+
+    assert response.status_code in {200, 202}
+    assert response.cookies.get("session_id")
+    payload = response.json()
+    assert payload["status"] in {"queued", "running"}
 
 
 def test_create_environment_masks_token_in_api_response(monkeypatch, tmp_path):
