@@ -610,14 +610,7 @@ class TempMailService(BaseEmailService):
                             "invalid authorization",
                             "missing authorization",
                         )
-                        custom_auth_signals = (
-                            "custom auth",
-                            "x-custom-auth",
-                            "site password",
-                        )
-                        if any(signal in error_blob_l for signal in custom_auth_signals) and not any(
-                            signal in error_blob_l for signal in stronger_auth_signals
-                        ):
+                        if not any(signal in error_blob_l for signal in stronger_auth_signals):
                             msg = (
                                 f"请求失败: {status_code} - TempMail site_password misconfiguration: "
                                 "x-custom-auth was rejected"

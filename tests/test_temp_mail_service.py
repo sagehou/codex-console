@@ -590,3 +590,25 @@ def test_401_with_custom_auth_and_bearer_error_is_not_mislabeled_as_site_passwor
         )
 
     assert "site_password" not in str(exc_info.value)
+
+
+def test_403_with_custom_auth_defaults_to_site_password_misconfiguration():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "site_password": "site-secret",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(status_code=403, payload={"error": "forbidden"}),
+    ])
+    service.http_client = fake_client
+
+    with pytest.raises(EmailServiceError, match="site_password misconfiguration") as exc_info:
+        service._make_request(
+            "POST",
+            "/api/emails",
+            json={"name": "tester", "domain": "example.com"},
+        )
+
+    assert "x-custom-auth was rejected" in str(exc_info.value)
