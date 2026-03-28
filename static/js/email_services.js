@@ -502,6 +502,10 @@ async function handleAddCustom(e) {
             domain: formData.get('tm_domain'),
             enable_prefix: true
         };
+        const sitePassword = formData.get('tm_site_password');
+        if (sitePassword && sitePassword.trim()) {
+            config.site_password = sitePassword.trim();
+        }
     } else if (subType === 'duckmail') {
         serviceType = 'duck_mail';
         config = {
@@ -761,7 +765,10 @@ async function editCustomService(id, subType) {
         } else if (resolvedSubType === 'tempmail') {
             document.getElementById('edit-tm-base-url').value = service.config?.base_url || '';
             document.getElementById('edit-tm-admin-password').value = '';
-            document.getElementById('edit-tm-admin-password').placeholder = service.config?.admin_password ? '已设置，留空保持不变' : '请输入 Admin 密码';
+            document.getElementById('edit-tm-admin-password').placeholder = service.config?.has_admin_password ? '已设置，留空保持不变' : '请输入 Admin 密码';
+            document.getElementById('edit-tm-site-password').value = '';
+            document.getElementById('edit-tm-site-password').placeholder = service.config?.has_site_password ? '已设置，留空保持当前站点密码' : 'x-custom-auth 密码，未启用可留空';
+            document.getElementById('edit-tm-clear-site-password').checked = false;
             document.getElementById('edit-tm-domain').value = service.config?.domain || '';
         } else if (resolvedSubType === 'duckmail') {
             document.getElementById('edit-dm-base-url').value = service.config?.base_url || '';
@@ -819,6 +826,13 @@ async function handleEditCustom(e) {
         };
         const pwd = formData.get('tm_admin_password');
         if (pwd && pwd.trim()) config.admin_password = pwd.trim();
+        const sitePassword = formData.get('tm_site_password');
+        const clearSitePassword = formData.get('tm_clear_site_password') === 'on';
+        if (clearSitePassword) {
+            config.site_password = '';
+        } else if (sitePassword && sitePassword.trim()) {
+            config.site_password = sitePassword.trim();
+        }
     } else if (subType === 'duckmail') {
         config = {
             base_url: formData.get('dm_base_url'),

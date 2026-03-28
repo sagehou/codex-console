@@ -100,6 +100,15 @@ def test_normalize_temp_mail_config_clears_site_password_on_empty_string():
     assert normalized["site_password"] == ""
 
 
+def test_temp_mail_service_type_uses_site_password_only_for_update_clear_protocol():
+    result = asyncio.run(email_routes.get_service_types())
+    temp_mail_type = next(item for item in result["types"] if item["value"] == "temp_mail")
+    field_names = {field["name"] for field in temp_mail_type["config_fields"]}
+
+    assert "site_password" in field_names
+    assert "clear_site_password" not in field_names
+
+
 def test_create_email_service_persists_normalized_temp_mail_domain(monkeypatch):
     make_test_db(monkeypatch, "temp_mail_create_routes.db")
     request = email_routes.EmailServiceCreate(

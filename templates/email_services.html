@@ -300,8 +300,14 @@
                             <input type="password" id="custom-tm-admin-password" name="tm_admin_password" placeholder="x-admin-auth 密码">
                         </div>
                         <div class="form-group">
-                            <label for="custom-tm-domain">邮箱域名</label>
-                            <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com">
+                            <label for="custom-tm-site-password">站点密码（可选）</label>
+                            <input type="password" id="custom-tm-site-password" name="tm_site_password" placeholder="x-custom-auth 密码，未启用可留空">
+                            <small style="color: var(--text-muted);">配置后将作为 x-custom-auth 请求头发送。</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-tm-domain">邮箱域名（支持多个，逗号分隔）</label>
+                            <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com, example.org">
+                            <small style="color: var(--text-muted);">创建地址时会从域名列表中随机选择一个。</small>
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
@@ -451,8 +457,20 @@
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
-                            <label for="edit-tm-domain">邮箱域名</label>
-                            <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com">
+                            <label for="edit-tm-site-password">站点密码（可选）</label>
+                            <input type="password" id="edit-tm-site-password" name="tm_site_password" placeholder="x-custom-auth 密码，未启用可留空">
+                            <small style="color: var(--text-muted);">留空则保持当前站点密码，输入新值则替换，勾选下方选项则清空已保存的站点密码。</small>
+                        </div>
+                        <div class="form-group">
+                            <label>
+                                <input type="checkbox" id="edit-tm-clear-site-password" name="tm_clear_site_password">
+                                清空已保存的站点密码
+                            </label>
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-tm-domain">邮箱域名（支持多个，逗号分隔）</label>
+                            <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com, example.org">
+                            <small style="color: var(--text-muted);">创建地址时会从域名列表中随机选择一个。</small>
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
