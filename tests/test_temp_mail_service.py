@@ -569,7 +569,8 @@ def test_get_verification_code_uses_shared_cached_password_for_cold_cache_instan
     assert fake_client.calls[1]["kwargs"]["headers"]["Authorization"] == "Bearer fresh-jwt"
 
 
-def test_401_with_custom_auth_and_bearer_error_is_not_mislabeled_as_site_password():
+@pytest.mark.parametrize("status_code", [401, 403])
+def test_generic_auth_failures_with_custom_auth_default_to_site_password_misconfiguration(status_code):
     service = TempMailService({
         "base_url": "https://mail.example.com",
         "admin_password": "admin-secret",
@@ -577,11 +578,34 @@ def test_401_with_custom_auth_and_bearer_error_is_not_mislabeled_as_site_passwor
         "site_password": "site-secret",
     })
     fake_client = FakeHTTPClient([
-        FakeResponse(status_code=401, payload={"error": "invalid bearer token"}),
+        FakeResponse(status_code=status_code, payload={"error": "forbidden"}),
     ])
     service.http_client = fake_client
 
-    with pytest.raises(EmailServiceError, match="invalid bearer token") as exc_info:
+    with pytest.raises(EmailServiceError, match="site_password misconfiguration") as exc_info:
+        service._make_request(
+            "POST",
+            "/api/emails",
+            json={"name": "tester", "domain": "example.com"},
+        )
+
+    assert "x-custom-auth was rejected" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("error_text", ["invalid bearer token", "jwt validation failed"])
+def test_explicit_bearer_or_jwt_failures_are_not_mislabeled_as_site_password(error_text):
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "site_password": "site-secret",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(status_code=401, payload={"error": error_text}),
+    ])
+    service.http_client = fake_client
+
+    with pytest.raises(EmailServiceError, match=error_text) as exc_info:
         service._make_request(
             "GET",
             "/api/mails",
@@ -592,7 +616,7 @@ def test_401_with_custom_auth_and_bearer_error_is_not_mislabeled_as_site_passwor
     assert "site_password" not in str(exc_info.value)
 
 
-def test_403_with_custom_auth_defaults_to_site_password_misconfiguration():
+def test_custom_auth_token_phrasing_still_maps_to_site_password_misconfiguration():
     service = TempMailService({
         "base_url": "https://mail.example.com",
         "admin_password": "admin-secret",
@@ -600,7 +624,7 @@ def test_403_with_custom_auth_defaults_to_site_password_misconfiguration():
         "site_password": "site-secret",
     })
     fake_client = FakeHTTPClient([
-        FakeResponse(status_code=403, payload={"error": "forbidden"}),
+        FakeResponse(status_code=401, payload={"error": "bad custom auth token"}),
     ])
     service.http_client = fake_client
 

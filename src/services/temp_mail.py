@@ -604,11 +604,11 @@ class TempMailService(BaseEmailService):
                         stronger_auth_signals = (
                             "bearer",
                             "jwt",
-                            "token",
-                            "expired",
                             "authorization",
                             "invalid authorization",
                             "missing authorization",
+                            "admin auth",
+                            "x-admin-auth",
                         )
                         if not any(signal in error_blob_l for signal in stronger_auth_signals):
                             msg = (
