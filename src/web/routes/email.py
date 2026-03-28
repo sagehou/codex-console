@@ -376,11 +376,15 @@ async def get_email_service(service_id: int):
 
 @router.get("/{service_id}/full")
 async def get_email_service_full(service_id: int):
-    """获取单个邮箱服务完整详情（包含敏感字段，用于编辑）"""
+    """获取单个邮箱服务详情，TempMail secrets 使用 presence flags 表示。"""
     with get_db() as db:
         service = db.query(EmailServiceModel).filter(EmailServiceModel.id == service_id).first()
         if not service:
             raise HTTPException(status_code=404, detail="服务不存在")
+
+        config = service.config or {}
+        if service.service_type == "temp_mail":
+            config = filter_sensitive_config(config)
 
         return {
             "id": service.id,
@@ -388,7 +392,7 @@ async def get_email_service_full(service_id: int):
             "name": service.name,
             "enabled": service.enabled,
             "priority": service.priority,
-            "config": service.config or {},  # 返回完整配置
+            "config": config,
             "last_used": service.last_used.isoformat() if service.last_used else None,
             "created_at": service.created_at.isoformat() if service.created_at else None,
             "updated_at": service.updated_at.isoformat() if service.updated_at else None,

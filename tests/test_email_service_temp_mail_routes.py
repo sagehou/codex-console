@@ -144,3 +144,18 @@ def test_update_email_service_clears_site_password_on_empty_string(monkeypatch):
     assert service.config["domain"] == "a.com"
     assert service.config.get("has_site_password") is False
     assert "site_password" not in service.config
+
+
+def test_get_email_service_full_hides_temp_mail_secrets_with_presence_flags(monkeypatch):
+    manager = make_test_db(monkeypatch, "temp_mail_full_routes.db")
+    temp_mail_service = create_temp_mail_service(manager)
+
+    result = asyncio.run(email_routes.get_email_service_full(temp_mail_service.id))
+
+    assert result["config"]["base_url"] == "https://mail.example.com"
+    assert result["config"]["domain"] == "old.com"
+    assert result["config"]["enable_prefix"] is True
+    assert result["config"]["has_admin_password"] is True
+    assert result["config"]["has_site_password"] is True
+    assert "admin_password" not in result["config"]
+    assert "site_password" not in result["config"]
