@@ -100,6 +100,21 @@ def test_normalize_temp_mail_config_clears_site_password_on_empty_string():
     assert normalized["site_password"] == ""
 
 
+def test_normalize_temp_mail_config_clear_also_removes_legacy_custom_auth():
+    normalized = email_routes.normalize_temp_mail_config(
+        {"domain": "a.com", "site_password": ""},
+        existing_config={
+            "site_password": "site-secret",
+            "custom_auth": "legacy-secret",
+            "domain": "old.com",
+        },
+        is_update=True,
+    )
+
+    assert normalized["site_password"] == ""
+    assert "custom_auth" not in normalized
+
+
 def test_temp_mail_service_type_uses_site_password_only_for_update_clear_protocol():
     result = asyncio.run(email_routes.get_service_types())
     temp_mail_type = next(item for item in result["types"] if item["value"] == "temp_mail")
@@ -153,6 +168,33 @@ def test_update_email_service_clears_site_password_on_empty_string(monkeypatch):
     assert service.config["domain"] == "a.com"
     assert service.config.get("has_site_password") is False
     assert "site_password" not in service.config
+
+
+def test_update_email_service_clear_removes_legacy_custom_auth(monkeypatch):
+    manager = make_test_db(monkeypatch, "temp_mail_update_clear_legacy_routes.db")
+    temp_mail_service = create_temp_mail_service(manager)
+
+    with manager.session_scope() as session:
+        service = session.query(EmailService).filter(EmailService.id == temp_mail_service.id).first()
+        service.config = {
+            **service.config,
+            "custom_auth": "legacy-secret",
+        }
+
+    request = email_routes.EmailServiceUpdate(config={"domain": "a.com", "site_password": ""})
+
+    service = asyncio.run(email_routes.update_email_service(temp_mail_service.id, request))
+
+    assert service.config["domain"] == "a.com"
+    assert service.config.get("has_site_password") is False
+    assert "site_password" not in service.config
+    assert "custom_auth" not in service.config
+
+    with manager.session_scope() as session:
+        persisted = session.query(EmailService).filter(EmailService.id == temp_mail_service.id).first()
+        assert persisted is not None
+        assert persisted.config["site_password"] == ""
+        assert "custom_auth" not in persisted.config
 
 
 def test_get_email_service_full_hides_temp_mail_secrets_with_presence_flags(monkeypatch):

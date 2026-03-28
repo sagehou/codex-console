@@ -128,6 +128,7 @@ def normalize_temp_mail_config(
     """Normalize TempMail config while preserving site_password semantics."""
     normalized = dict(existing_config or {}) if is_update else {}
     incoming = dict(config or {})
+    clear_site_password = False
 
     if "domain" in incoming:
         parts = [part.strip() for part in str(incoming.get("domain") or "").split(",")]
@@ -145,8 +146,12 @@ def normalize_temp_mail_config(
         site_password = str(incoming["site_password"] or "")
         if is_update:
             normalized["site_password"] = site_password
+            clear_site_password = site_password == ""
         elif site_password:
             normalized["site_password"] = site_password
+
+    if clear_site_password:
+        normalized.pop("custom_auth", None)
 
     return normalized
 
