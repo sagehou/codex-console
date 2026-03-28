@@ -13,6 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from ...database import crud
 from ...database.models import MaintenanceActionLog, MaintenanceRun, RemoteAuthInventory
 from ...database.session import get_db
+from ...core.cliproxy.secrets import encrypt_cliproxy_token
 from ...core.cliproxy.client import CLIProxyAPIClient
 from ...core.cliproxy.maintenance import CLIProxyMaintenanceEngine
 from ...core.tasks.cliproxy_aggregate import run_cliproxy_aggregate_task
@@ -269,6 +270,10 @@ def _build_aggregate_service_payloads(db, service_ids: List[int]) -> List[Dict[s
     services = []
     for service_id in crud.normalize_cliproxy_service_ids(service_ids):
         service = _get_ready_cpa_service_or_raise(db, service_id)
+        try:
+            encrypt_cliproxy_token(service.api_token)
+        except ValueError as exc:
+            _raise_invalid_cliproxy_encryption_key(exc)
         services.append(
             {
                 "service_id": service.id,
@@ -328,6 +333,16 @@ def _cliproxy_cpa_validation_error(service) -> HTTPException:
     )
 
 
+def _raise_invalid_cliproxy_encryption_key(exc: ValueError) -> None:
+    raise HTTPException(
+        status_code=503,
+        detail={
+            "code": "cliproxy_encryption_key_invalid",
+            "message": str(exc),
+        },
+    ) from exc
+
+
 def _get_ready_cpa_service_or_raise(db, service_id: int):
     service = crud.get_cpa_service_by_id(db, service_id)
     if service is None or not service.enabled:
@@ -342,6 +357,10 @@ def _get_ready_cpa_service_or_raise(db, service_id: int):
 def _create_or_replay_cpa_service_run(service_id: int, run_type: str, request_data: Dict[str, Any]):
     with get_db() as db:
         service = _get_ready_cpa_service_or_raise(db, service_id)
+        try:
+            encrypt_cliproxy_token(service.api_token)
+        except ValueError as exc:
+            _raise_invalid_cliproxy_encryption_key(exc)
         environment = crud.ensure_cliproxy_environment_for_cpa_service(db, service)
         run, created = crud.create_maintenance_run_if_available(
             db,

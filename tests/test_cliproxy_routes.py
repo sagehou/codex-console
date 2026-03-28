@@ -207,6 +207,27 @@ def test_cliproxy_scan_self_heals_missing_session_cookie(monkeypatch, tmp_path):
     assert payload["status"] in {"queued", "running"}
 
 
+def test_cliproxy_scan_rejects_missing_encryption_key_before_queue(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+    authenticate_client(client)
+    monkeypatch.setenv("CLIPROXY_ENCRYPTION_KEY", "")
+
+    with get_db() as db:
+        service = create_cpa_service(db, name="alpha")
+
+    response = client.post(
+        "/api/cliproxy/scan",
+        json={"service_ids": [service.id]},
+    )
+
+    assert response.status_code == 503
+    payload = response.json()
+    assert payload["detail"]["code"] == "cliproxy_encryption_key_invalid"
+
+    with get_db() as db:
+        assert db.query(MaintenanceRun).count() == 0
+
+
 def test_create_environment_masks_token_in_api_response(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path)
     authenticate_client(client)
