@@ -68,6 +68,35 @@ def _build_cliproxy_page_context(request: Request) -> dict:
     }
 
 
+def _build_cpa_page_context(request: Request) -> dict:
+    session_id = get_current_session_id(request)
+    try:
+        with get_db() as db:
+            selector_payload = crud.get_cpa_workbench_service_selector_data(db)
+            selected_service_ids = selector_payload.get("selected_service_ids") or []
+            latest_tasks = []
+            if session_id and selected_service_ids:
+                for task_type in (crud.CPA_WORKBENCH_SCAN_TASK_TYPE, crud.CPA_WORKBENCH_ACTION_TASK_TYPE):
+                    task = crud.get_latest_active_cpa_workbench_task(
+                        db,
+                        owner_session_id=session_id,
+                        task_type=task_type,
+                        service_ids=selected_service_ids,
+                    )
+                    if task is not None:
+                        latest_tasks.append(task)
+    except RuntimeError:
+        selector_payload = {"selected_service_ids": []}
+        latest_tasks = []
+
+    latest_task = max(latest_tasks, key=lambda task: int(task.id)) if latest_tasks else None
+    return {
+        "cpa_latest_active_task": crud.serialize_cpa_workbench_task(latest_task) if latest_task else None,
+        "cpa_selection_recovery": None,
+        "cpa_selection_notice": None,
+    }
+
+
 def _build_static_asset_version(static_dir: Path) -> str:
     """基于静态文件最后修改时间生成版本号，避免部署后浏览器继续使用旧缓存。"""
     latest_mtime = 0
@@ -200,6 +229,17 @@ def create_app() -> FastAPI:
             request=request,
             name="cliproxy.html",
             context=_build_cliproxy_page_context(request),
+        )
+
+    @app.get("/cpa", response_class=HTMLResponse)
+    async def cpa_workbench_page(request: Request):
+        """CPA 管理工作台页面"""
+        if not is_webui_authenticated(request):
+            return _redirect_to_login(request)
+        return templates.TemplateResponse(
+            request=request,
+            name="cpa_workbench.html",
+            context=_build_cpa_page_context(request),
         )
 
     @app.get("/email-services", response_class=HTMLResponse)

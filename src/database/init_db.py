@@ -301,6 +301,63 @@ def _backfill_temp_mail_domains(db_manager):
         db.commit()
 
 
+def _backfill_cpa_workbench_task_table(db_manager):
+    """确保 CPA 工作台任务表存在。"""
+    try:
+        inspector = inspect(db_manager.engine)
+        inspector.get_columns("cpa_workbench_tasks")
+        return
+    except NoSuchTableError:
+        pass
+
+    with _get_managed_db_session(db_manager) as db:
+        db.execute(
+            text(
+                "CREATE TABLE cpa_workbench_tasks ("
+                "id INTEGER NOT NULL PRIMARY KEY, "
+                "task_type VARCHAR(32) NOT NULL, "
+                "owner_session_id VARCHAR(255) NOT NULL, "
+                "scope_key VARCHAR(255) NOT NULL, "
+                "status VARCHAR(20) NOT NULL DEFAULT 'queued', "
+                "total_count INTEGER NOT NULL DEFAULT 0, "
+                "processed_count INTEGER NOT NULL DEFAULT 0, "
+                "current_item VARCHAR(255), "
+                "log_lines TEXT, "
+                "stats_json TEXT, "
+                "created_at DATETIME, "
+                "started_at DATETIME, "
+                "completed_at DATETIME, "
+                "updated_at DATETIME"
+                ")"
+            )
+        )
+        db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpa_workbench_tasks_task_type "
+                "ON cpa_workbench_tasks (task_type)"
+            )
+        )
+        db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpa_workbench_tasks_owner_session_id "
+                "ON cpa_workbench_tasks (owner_session_id)"
+            )
+        )
+        db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpa_workbench_tasks_scope_key "
+                "ON cpa_workbench_tasks (scope_key)"
+            )
+        )
+        db.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_cpa_workbench_tasks_status "
+                "ON cpa_workbench_tasks (status)"
+            )
+        )
+        db.commit()
+
+
 def initialize_database(database_url: str = None):
     """
     初始化数据库
@@ -319,6 +376,7 @@ def initialize_database(database_url: str = None):
     _backfill_account_traceability_columns(db_manager)
     _backfill_batch_subscription_task_columns(db_manager)
     _backfill_temp_mail_domains(db_manager)
+    _backfill_cpa_workbench_task_table(db_manager)
 
     # 初始化默认设置（从 settings 模块导入以避免循环导入）
     from ..config.settings import init_default_settings

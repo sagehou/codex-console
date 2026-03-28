@@ -57,7 +57,7 @@ const elements = {
     detailSubscriptionQuota: document.getElementById('detail-subscription-quota'),
     detailCoreOps: document.getElementById('detail-core-ops'),
     detailAutomationTrace: document.getElementById('detail-automation-trace'),
-    detailCliProxySummary: document.getElementById('detail-cliproxy-summary'),
+    detailCpaSummary: document.getElementById('detail-cpa-summary'),
     batchCheckTaskPanel: document.getElementById('batch-check-task-panel'),
     batchCheckTaskStatus: document.getElementById('batch-check-task-status'),
     batchCheckTaskSummary: document.getElementById('batch-check-task-summary'),
@@ -75,13 +75,23 @@ const elements = {
 
 // 初始化
 document.addEventListener('DOMContentLoaded', async () => {
+    const initialAccountId = getInitialAccountId();
     loadStats();
     initEventListeners();
     updateBatchButtons();  // 初始化按钮状态
     renderSelectAllBanner();
     await loadAccounts();
     await restoreLatestBatchCheckTask();
+    if (initialAccountId) {
+        await viewAccount(initialAccountId);
+    }
 });
+
+function getInitialAccountId() {
+    const params = new URLSearchParams(window.location.search);
+    const value = parseInt(params.get('account_id') || '', 10);
+    return Number.isInteger(value) && value > 0 ? value : null;
+}
 
 // 事件监听
 function initEventListeners() {
@@ -137,7 +147,6 @@ function initEventListeners() {
         e.stopPropagation();
         uploadMenu.classList.toggle('active');
     });
-    document.getElementById('batch-upload-cpa-item').addEventListener('click', (e) => { e.preventDefault(); uploadMenu.classList.remove('active'); handleBatchUploadCpa(); });
     document.getElementById('batch-upload-sub2api-item').addEventListener('click', (e) => { e.preventDefault(); uploadMenu.classList.remove('active'); handleBatchUploadSub2Api(); });
     document.getElementById('batch-upload-tm-item').addEventListener('click', (e) => { e.preventDefault(); uploadMenu.classList.remove('active'); handleBatchUploadTm(); });
 
@@ -758,7 +767,7 @@ async function viewAccount(id) {
         renderSubscriptionQuotaLayer(account);
         renderCoreOpsLayer(account, tokens);
         renderAutomationTraceLayer(account, tokens);
-        renderCliProxySummaryLayer(account);
+        renderCpaSummaryLayer(account);
     } catch (error) {
         toast.error('加载账号详情失败: ' + error.message);
     }
@@ -833,7 +842,7 @@ async function exportAccounts(format) {
 
         // 从 Content-Disposition 获取文件名
         const disposition = response.headers.get('Content-Disposition');
-        let filename = `accounts_${Date.now()}.${(format === 'cpa' || format === 'sub2api') ? 'json' : format}`;
+        let filename = `accounts_${Date.now()}.${format === 'sub2api' ? 'json' : format}`;
         if (disposition) {
             const match = disposition.match(/filename=(.+)/);
             if (match) {
@@ -866,80 +875,9 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-// ============== CPA 服务选择 ==============
-
-// 弹出 CPA 服务选择框，返回 Promise<{cpa_service_id: number|null}|null>
-// null 表示用户取消，{cpa_service_id: null} 表示使用全局配置
-function selectCpaService() {
-    return new Promise(async (resolve) => {
-        const modal = document.getElementById('cpa-service-modal');
-        const listEl = document.getElementById('cpa-service-list');
-        const closeBtn = document.getElementById('close-cpa-modal');
-        const cancelBtn = document.getElementById('cancel-cpa-modal-btn');
-        const globalBtn = document.getElementById('cpa-use-global-btn');
-
-        // 加载服务列表
-        listEl.innerHTML = '<div style="text-align:center;color:var(--text-muted)">加载中...</div>';
-        modal.classList.add('active');
-
-        let services = [];
-        try {
-            services = await api.get('/cpa-services?enabled=true');
-        } catch (e) {
-            services = [];
-        }
-
-        if (services.length === 0) {
-            listEl.innerHTML = '<div style="text-align:center;color:var(--text-muted);padding:12px;">暂无已启用的 CPA 服务，将使用全局配置</div>';
-        } else {
-            listEl.innerHTML = services.map(s => `
-                <div class="cpa-service-item" data-id="${s.id}" style="
-                    padding: 10px 14px;
-                    border: 1px solid var(--border);
-                    border-radius: 8px;
-                    cursor: pointer;
-                    transition: background 0.15s;
-                    display: flex;
-                    justify-content: space-between;
-                    align-items: center;
-                ">
-                    <div>
-                        <div style="font-weight:500;">${escapeHtml(s.name)}</div>
-                        <div style="font-size:0.8rem;color:var(--text-muted);">${escapeHtml(s.api_url)}</div>
-                    </div>
-                    <span class="badge" style="background:var(--success-color);color:#fff;font-size:0.7rem;padding:2px 8px;border-radius:10px;">选择</span>
-                </div>
-            `).join('');
-
-            listEl.querySelectorAll('.cpa-service-item').forEach(item => {
-                item.addEventListener('mouseenter', () => item.style.background = 'var(--surface-hover)');
-                item.addEventListener('mouseleave', () => item.style.background = '');
-                item.addEventListener('click', () => {
-                    cleanup();
-                    resolve({ cpa_service_id: parseInt(item.dataset.id) });
-                });
-            });
-        }
-
-        function cleanup() {
-            modal.classList.remove('active');
-            closeBtn.removeEventListener('click', onCancel);
-            cancelBtn.removeEventListener('click', onCancel);
-            globalBtn.removeEventListener('click', onGlobal);
-        }
-        function onCancel() { cleanup(); resolve(null); }
-        function onGlobal() { cleanup(); resolve({ cpa_service_id: null }); }
-
-        closeBtn.addEventListener('click', onCancel);
-        cancelBtn.addEventListener('click', onCancel);
-        globalBtn.addEventListener('click', onGlobal);
-    });
-}
-
 // 统一上传入口：弹出目标选择
 async function uploadAccount(id) {
     const targets = [
-        { label: '☁️ 上传到 CPA', value: 'cpa' },
         { label: '🔗 上传到 Sub2API', value: 'sub2api' },
         { label: '🚀 上传到 Team Manager', value: 'tm' },
     ];
@@ -968,63 +906,8 @@ async function uploadAccount(id) {
     });
 
     if (!choice) return;
-    if (choice === 'cpa') return uploadToCpa(id);
     if (choice === 'sub2api') return uploadToSub2Api(id);
     if (choice === 'tm') return uploadToTm(id);
-}
-
-// 上传单个账号到CPA
-async function uploadToCpa(id) {
-    const choice = await selectCpaService();
-    if (choice === null) return;  // 用户取消
-
-    try {
-        toast.info('正在上传到CPA...');
-        const payload = {};
-        if (choice.cpa_service_id != null) payload.cpa_service_id = choice.cpa_service_id;
-        const result = await api.post(`/accounts/${id}/upload-cpa`, payload);
-
-        if (result.success) {
-            toast.success('上传成功');
-            loadAccounts();
-        } else {
-            toast.error('上传失败: ' + (result.error || '未知错误'));
-        }
-    } catch (error) {
-        toast.error('上传失败: ' + error.message);
-    }
-}
-
-// 批量上传到CPA
-async function handleBatchUploadCpa() {
-    const count = getEffectiveCount();
-    if (count === 0) return;
-
-    const choice = await selectCpaService();
-    if (choice === null) return;  // 用户取消
-
-    const confirmed = await confirm(`确定要将选中的 ${count} 个账号上传到CPA吗？`);
-    if (!confirmed) return;
-
-    elements.batchUploadBtn.disabled = true;
-    elements.batchUploadBtn.textContent = '上传中...';
-
-    try {
-        const payload = buildBatchPayload();
-        if (choice.cpa_service_id != null) payload.cpa_service_id = choice.cpa_service_id;
-        const result = await api.post('/accounts/batch-upload-cpa', payload);
-
-        let message = `成功: ${result.success_count}`;
-        if (result.failed_count > 0) message += `, 失败: ${result.failed_count}`;
-        if (result.skipped_count > 0) message += `, 跳过: ${result.skipped_count}`;
-
-        toast.success(message);
-        loadAccounts();
-    } catch (error) {
-        toast.error('批量上传失败: ' + error.message);
-    } finally {
-        updateBatchButtons();
-    }
 }
 
 // ============== 订阅状态 ==============
@@ -1387,7 +1270,7 @@ function updateDetailIdentity(account) {
 function renderEmptyDetailPanel() {
     if (!elements.detailSubscriptionQuota) return;
     elements.detailIdentityTitle.textContent = '选择一个账号';
-    elements.detailIdentitySubtitle.textContent = '从左侧主列表选择账号，查看订阅、额度、远程维护和 CLIProxy 摘要。';
+    elements.detailIdentitySubtitle.textContent = '从左侧主列表选择账号，查看订阅、额度、远程维护和 CPA 摘要。';
     if (elements.secondaryDetailRegion) {
         elements.secondaryDetailRegion.innerHTML = `
             <h4>低频字段收纳区</h4>
@@ -1397,7 +1280,7 @@ function renderEmptyDetailPanel() {
     elements.detailSubscriptionQuota.textContent = '在这里查看订阅类型、额度限制、风险/待处理状态以及最近活动概览。';
     elements.detailCoreOps.textContent = '账号身份头部、核心运维卡片和常用快捷操作会在这里展开。';
     elements.detailAutomationTrace.textContent = '显示 source、batch、proxy、recent tasks 和日志摘录。';
-    elements.detailCliProxySummary.textContent = '显示账号侧 CLIProxy 关联环境、远程文件、同步状态，以及进入维护视图的入口。';
+    elements.detailCpaSummary.textContent = '显示账号侧 CPA 摘要，并提供进入 CPA 管理工作台的入口。';
 }
 
 function renderSecondaryDetailRegion(account, tokens) {
@@ -1476,22 +1359,19 @@ function renderAutomationTraceLayer(account, tokens) {
     `;
 }
 
-function renderCliProxySummaryLayer(account) {
+function renderCpaSummaryLayer(account) {
     const remote = account.remote_inventory_summary || {};
-    const jumpEntry = account.cliproxy_jump_entry || {};
-    elements.detailCliProxySummary.innerHTML = `
+    const cpaHref = account.id ? `/cpa?account_id=${account.id}` : '/cpa';
+    elements.detailCpaSummary.innerHTML = `
         <div class="cliproxy-grid">
-            <span class="detail-chip"><strong>${escapeHtml(remote.environment_name || account.remote_environment_name || '-')}</strong><span>environment</span></span>
-            <span class="detail-chip"><strong>${escapeHtml(remote.remote_file_id || '-')}</strong><span>remote file</span></span>
+            <span class="detail-chip"><strong>${account.export_status_summary?.cpa_uploaded ? 'uploaded' : 'pending'}</strong><span>CPA export</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(account.last_upload_target || '-')}</strong><span>upload target</span></span>
             <span class="detail-chip"><strong>${escapeHtml(remote.sync_state || account.remote_sync_state || '-')}</strong><span>sync</span></span>
-            <span class="detail-chip"><strong>${escapeHtml(remote.probe_status || '-')}</strong><span>probe</span></span>
+            <span class="detail-chip"><strong>${escapeHtml(remote.probe_status || account.quota_summary?.probe_status || '-')}</strong><span>probe</span></span>
         </div>
-        <p>最近探测 ${format.date(remote.last_probed_at) || '-'}；最近发现 ${format.date(remote.last_seen_at) || '-'}；远程账号 ${escapeHtml(remote.remote_account_id || account.account_id || '-')}。</p>
+        <p>最近上传 ${format.date(account.export_status_summary?.cpa_uploaded_at) || '-'}；最近探测 ${format.date(remote.last_probed_at) || '-'}；远程账号 ${escapeHtml(remote.remote_account_id || account.account_id || '-')}。</p>
         <div class="detail-action-grid">
-            ${jumpEntry.href
-                ? `<a class="btn btn-secondary btn-sm" href="${escapeHtml(jumpEntry.href)}">${escapeHtml(jumpEntry.label || 'Open CLIProxy maintenance context')}</a>`
-                : '<span class="detail-chip"><strong>未关联维护运行</strong><span>jump entry</span></span>'}
-            <button class="btn btn-ghost btn-sm" onclick="copyToClipboard('${escapeHtml(remote.remote_file_id || '')}')">复制 remote file</button>
+            <a class="btn btn-secondary btn-sm" href="${escapeHtml(cpaHref)}">打开 CPA 管理</a>
         </div>
     `;
 }

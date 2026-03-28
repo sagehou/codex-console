@@ -407,6 +407,7 @@
                 <a href="/" class="nav-link">注册</a>
                 <a href="/accounts" class="nav-link active">账号管理</a>
                 <a href="/cliproxy" class="nav-link">CLIProxyAPI</a>
+                <a href="/cpa" class="nav-link">CPA管理</a>
                 <a href="/email-services" class="nav-link">邮箱服务</a>
                 <a href="/payment" class="nav-link">支付</a>
                 <a href="/settings" class="nav-link">设置</a>
@@ -477,7 +478,6 @@
                             <div class="dropdown-menu" id="export-menu">
                                 <a href="#" class="dropdown-item" data-format="json">导出 JSON</a>
                                 <a href="#" class="dropdown-item" data-format="csv">导出 CSV</a>
-                                <a href="#" class="dropdown-item" data-format="cpa">导出 CPA 格式</a>
                                 <a href="#" class="dropdown-item" data-format="sub2api">导出 Sub2Api 格式</a>
                             </div>
                         </div>
@@ -567,7 +567,6 @@
                         <div class="dropdown">
                             <button class="btn btn-success" id="batch-upload-btn" disabled>☁️ 上传</button>
                             <div class="dropdown-menu" id="upload-menu">
-                                <a href="#" class="dropdown-item" id="batch-upload-cpa-item">☁️ 上传到 CPA</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-sub2api-item">🔗 上传到 Sub2API</a>
                                 <a href="#" class="dropdown-item" id="batch-upload-tm-item">🚀 上传到 Team Manager</a>
                             </div>
@@ -618,33 +617,13 @@
                         <div id="detail-automation-trace" class="detail-empty">显示 source、batch、proxy、recent tasks 和日志摘录。</div>
                     </section>
 
-                    <section class="detail-layer-card" data-detail-layer="cliproxy-summary">
-                        <h4>CLIProxy 摘要与跳转</h4>
-                        <div id="detail-cliproxy-summary" class="detail-empty">显示账号侧 CLIProxy 关联环境、远程文件、同步状态，以及进入维护视图的入口。</div>
+                    <section class="detail-layer-card" data-detail-layer="cpa-summary">
+                        <h4>CPA 摘要与跳转</h4>
+                        <div id="detail-cpa-summary" class="detail-empty">显示账号侧 CPA 摘要，并提供进入 CPA 管理工作台的入口。</div>
                     </section>
                 </aside>
             </div>
         </main>
-    </div>
-
-    <!-- CPA 服务选择模态框 -->
-    <div class="modal" id="cpa-service-modal">
-        <div class="modal-content" style="max-width: 480px;">
-            <div class="modal-header">
-                <h3>☁️ 选择 CPA 服务</h3>
-                <button class="modal-close" id="close-cpa-modal">&times;</button>
-            </div>
-            <div class="modal-body">
-                <p style="color: var(--text-muted); margin-bottom: 12px; font-size: 0.9rem;">选择要上传到的 CPA 服务，或使用全局配置。</p>
-                <div id="cpa-service-list" style="display: flex; flex-direction: column; gap: 8px; max-height: 300px; overflow-y: auto;">
-                    <div style="text-align: center; color: var(--text-muted);">加载中...</div>
-                </div>
-            </div>
-            <div class="modal-footer" style="padding: 12px 20px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end;">
-                <button class="btn btn-secondary" id="cpa-use-global-btn">使用全局配置</button>
-                <button class="btn btn-secondary" id="cancel-cpa-modal-btn">取消</button>
-            </div>
-        </div>
     </div>
 
     <!-- Team Manager 服务选择模态框 -->

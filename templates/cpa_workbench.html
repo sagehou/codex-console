@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CPA管理 - OpenAI 注册系统</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ static_version }}">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🗂️</text></svg>">
+    <style>
+        .cpa-workbench {
+            display: grid;
+            grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.95fr);
+            gap: 20px;
+            align-items: start;
+        }
+        .cpa-main-column,
+        .cpa-detail-column {
+            min-width: 0;
+        }
+        .cpa-detail-column {
+            position: sticky;
+            top: 20px;
+        }
+        .cpa-stack,
+        .cpa-top-region {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .cpa-top-region {
+            display: grid;
+            grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+        }
+        .cpa-stat-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+        }
+        .cpa-shell-card {
+            min-height: 220px;
+        }
+        .cpa-task-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .cpa-task-field {
+            padding: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.62);
+        }
+        .cpa-task-field-label {
+            display: block;
+            margin-bottom: 6px;
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+        .cpa-task-field-value {
+            font-weight: 600;
+        }
+        .cpa-progress-track {
+            width: 100%;
+            height: 10px;
+            border-radius: 999px;
+            background: rgba(35, 53, 84, 0.12);
+            overflow: hidden;
+            margin-bottom: 16px;
+        }
+        .cpa-progress-bar {
+            height: 100%;
+            width: 0;
+            background: linear-gradient(90deg, #2f6fed, #5aa0ff);
+        }
+        .cpa-concurrency-controls {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .cpa-concurrency-controls label {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+        .cpa-concurrency-controls input {
+            width: 100%;
+        }
+        .cpa-task-logs {
+            margin: 0;
+            padding-left: 18px;
+            color: var(--text-secondary);
+        }
+        .cpa-shell-card h3,
+        .cpa-shell-card h4,
+        .cpa-shell-card p {
+            margin-top: 0;
+        }
+        .cpa-shell-card p {
+            color: var(--text-secondary);
+        }
+        .cpa-selector-card {
+            min-height: auto;
+        }
+        .cpa-selector-meta {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            color: var(--text-secondary);
+            font-size: 0.95rem;
+        }
+        .cpa-selector-list {
+            display: grid;
+            gap: 10px;
+        }
+        .cpa-selector-option {
+            display: flex;
+            gap: 12px;
+            align-items: flex-start;
+            padding: 12px 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.7);
+        }
+        .cpa-selector-option input {
+            margin-top: 3px;
+        }
+        .cpa-selector-option.is-disabled {
+            opacity: 0.72;
+        }
+        .cpa-selector-option-title {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+        .cpa-selector-option-title strong,
+        .cpa-selector-option-title span,
+        .cpa-selector-option p {
+            margin: 0;
+        }
+        .cpa-selector-state {
+            display: inline-flex;
+            padding: 2px 8px;
+            border-radius: 999px;
+            background: rgba(35, 53, 84, 0.08);
+            color: var(--text-secondary);
+            font-size: 0.82rem;
+        }
+        .cpa-detail-layer-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .cpa-detail-layer {
+            padding: 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.58);
+        }
+        .cpa-detail-layer h4,
+        .cpa-detail-layer p {
+            margin: 0 0 8px;
+        }
+        .cpa-detail-actions,
+        .cpa-detail-log-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin: 0;
+            padding-left: 18px;
+        }
+        .cpa-detail-action-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .cpa-detail-action-button,
+        .cpa-detail-log-link {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 36px;
+            padding: 0 14px;
+            border: 1px solid var(--border-color);
+            border-radius: 999px;
+            background: rgba(255, 255, 255, 0.82);
+            color: inherit;
+            text-decoration: none;
+            cursor: pointer;
+        }
+        .cpa-placeholder-list {
+            margin: 0;
+            padding-left: 18px;
+            color: var(--text-secondary);
+        }
+        .cpa-credential-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        .cpa-credential-table th,
+        .cpa-credential-table td {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+            text-align: left;
+            vertical-align: top;
+        }
+        .cpa-credential-table tbody tr {
+            cursor: pointer;
+        }
+        .cpa-credential-table tbody tr.is-selected {
+            background: rgba(47, 111, 237, 0.08);
+        }
+        .cpa-detail-kv {
+            display: grid;
+            grid-template-columns: minmax(88px, auto) 1fr;
+            gap: 8px 12px;
+            margin: 0;
+        }
+        .cpa-detail-kv dt {
+            color: var(--text-secondary);
+            font-weight: 600;
+        }
+        .cpa-detail-kv dd {
+            margin: 0;
+        }
+        @media (max-width: 1080px) {
+            .cpa-workbench,
+            .cpa-top-region {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar">
+            <div class="nav-brand">
+                <h1>OpenAI 注册系统</h1>
+            </div>
+            <div class="nav-links">
+                <a href="/" class="nav-link">注册</a>
+                <a href="/accounts" class="nav-link">账号管理</a>
+                <a href="/cliproxy" class="nav-link">CLIProxyAPI</a>
+                <a href="/cpa" class="nav-link active">CPA管理</a>
+                <a href="/email-services" class="nav-link">邮箱服务</a>
+                <a href="/payment" class="nav-link">支付</a>
+                <a href="/settings" class="nav-link">设置</a>
+                <a href="/logout" class="nav-link">退出</a>
+            </div>
+            <button class="theme-toggle" onclick="theme.toggle()" title="切换主题">
+                🌙
+            </button>
+        </nav>
+
+        <main class="main-content" data-page="cpa-workbench">
+            <div class="page-header">
+                <h2>CPA管理</h2>
+                <p class="subtitle">独立管理远端 CPA 凭据池，顶部关注统计与任务，底部查看列表，右侧查看单条详情。</p>
+            </div>
+
+            <section id="cpa-empty-state" class="card" data-empty-state="no-usable-services">
+                <div class="card-body">
+                    <strong>暂无可用 CPA 服务</strong>
+                    <p id="cpa-empty-state-message">请先在设置中配置并启用至少一个 CPA 服务。</p>
+                </div>
+            </section>
+
+            <section id="cpa-selection-notice" class="card hidden" data-notice-kind="selection-recovery">
+                <div class="card-body">
+                    <p>先前选中的凭据已不在当前视图中。</p>
+                </div>
+            </section>
+
+            <script id="cpa-latest-active-task-bootstrap" type="application/json">{{ cpa_latest_active_task | tojson if cpa_latest_active_task else 'null' }}</script>
+            <script id="cpa-selection-recovery-bootstrap" type="application/json">{{ cpa_selection_recovery | tojson if cpa_selection_recovery else 'null' }}</script>
+            <script id="cpa-selection-notice-bootstrap" type="application/json">{{ cpa_selection_notice | tojson if cpa_selection_notice else 'null' }}</script>
+
+            <div id="cpa-workbench" class="cpa-workbench">
+                <section class="cpa-main-column cpa-stack">
+                    <section id="cpa-service-selector" class="card cpa-selector-card" data-selection-mode="multi">
+                        <div class="card-header">
+                            <div>
+                                <h3>CPA 服务范围</h3>
+                                <p>多选服务后，统计、任务面板和凭据列表都会切换到当前范围。</p>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div class="cpa-selector-meta">
+                                <span>已选服务</span>
+                                <strong id="cpa-selected-service-count">0</strong>
+                            </div>
+                            <div id="cpa-service-selector-list" class="cpa-selector-list">
+                                <label class="cpa-selector-option is-disabled">
+                                    <input type="checkbox" disabled>
+                                    <span>
+                                        <span class="cpa-selector-option-title">
+                                            <strong>服务选择器即将加载</strong>
+                                            <span class="cpa-selector-state">loading</span>
+                                        </span>
+                                        <p>页面会根据 CPA 服务状态自动默认选择可用服务。</p>
+                                    </span>
+                                </label>
+                            </div>
+                        </div>
+                    </section>
+
+                    <div id="cpa-top-region" class="cpa-top-region">
+                        <div id="cpa-shell-top" class="cpa-top-region-shell">
+                        <section id="cpa-stats-panel" class="card cpa-shell-card" data-shell-region="stats">
+                            <div class="card-header">
+                                <div>
+                                    <h3>统计概览</h3>
+                                    <p>这里将汇总当前所选 CPA 服务下的远端凭据状态。</p>
+                                </div>
+                            </div>
+                            <div id="cpa-stats-region" class="card-body">
+                                <div class="cpa-stat-grid">
+                                    <div class="stat-card" data-stat-key="total"><div class="stat-value">0</div><div class="stat-label">总数</div></div>
+                                    <div class="stat-card success" data-stat-key="valid_count"><div class="stat-value">0</div><div class="stat-label">可用</div></div>
+                                    <div class="stat-card warning" data-stat-key="expired_count"><div class="stat-value">0</div><div class="stat-label">401</div></div>
+                                    <div class="stat-card info" data-stat-key="quota_count"><div class="stat-value">0</div><div class="stat-label">配额</div></div>
+                                    <div class="stat-card" data-stat-key="error_count"><div class="stat-value">0</div><div class="stat-label">异常</div></div>
+                                    <div class="stat-card" data-stat-key="unknown_count"><div class="stat-value">0</div><div class="stat-label">未知</div></div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section id="cpa-task-panel" class="card cpa-shell-card" data-shell-region="active-task">
+                            <div class="card-header">
+                                <div>
+                                    <h3>当前任务</h3>
+                                    <p>这里将显示扫描、删除和禁用任务的进度与日志。</p>
+                                </div>
+                            </div>
+                            <div id="cpa-active-task-region" class="card-body">
+                                <div class="cpa-task-grid">
+                                    <div class="cpa-task-field" data-task-field="type">
+                                        <span class="cpa-task-field-label">任务类型</span>
+                                        <span class="cpa-task-field-value">-</span>
+                                    </div>
+                                    <div class="cpa-task-field" data-task-field="total">
+                                        <span class="cpa-task-field-label">总数</span>
+                                        <span class="cpa-task-field-value">0</span>
+                                    </div>
+                                    <div class="cpa-task-field" data-task-field="processed">
+                                        <span class="cpa-task-field-label">已完成</span>
+                                        <span class="cpa-task-field-value">0</span>
+                                    </div>
+                                    <div class="cpa-task-field" data-task-field="current_item">
+                                        <span class="cpa-task-field-label">当前条目</span>
+                                        <span class="cpa-task-field-value">暂无任务</span>
+                                    </div>
+                                </div>
+                                <div class="cpa-progress-track">
+                                    <div id="cpa-task-progress-bar" class="cpa-progress-bar" style="width: 0%"></div>
+                                </div>
+                                <div class="cpa-concurrency-controls">
+                                    <label>
+                                        扫描并发
+                                        <input type="number" name="scan-concurrency" min="1" value="2" data-default-concurrency="2">
+                                    </label>
+                                    <label>
+                                        删除并发
+                                        <input type="number" name="delete-concurrency" min="1" value="2" data-default-concurrency="2">
+                                    </label>
+                                    <label>
+                                        禁用并发
+                                        <input type="number" name="disable-concurrency" min="1" value="2" data-default-concurrency="2">
+                                    </label>
+                                </div>
+                                <ul id="cpa-task-log-list" class="cpa-task-logs">
+                                    <li>等待任务数据...</li>
+                                </ul>
+                            </div>
+                        </section>
+                        </div>
+                    </div>
+
+                    <section id="cpa-bottom-region" class="card cpa-shell-card" data-shell-region="credential-list">
+                        <div id="cpa-shell-bottom">
+                        <div class="card-header">
+                            <div>
+                                <h3 id="cpa-credential-list-panel">远端凭据列表</h3>
+                                <p>这里将承载当前选中服务范围内的 CPA 凭据列表。</p>
+                            </div>
+                        </div>
+                        <div id="cpa-credential-list-region" class="card-body">
+                            <table id="cpa-credential-table" class="cpa-credential-table" data-inventory-table="credentials">
+                                <thead>
+                                    <tr>
+                                        <th data-column="credential_id">凭据标识</th>
+                                        <th data-column="service_name">服务来源</th>
+                                        <th data-column="status">状态</th>
+                                        <th data-column="quota_status">配额</th>
+                                        <th data-column="last_scanned_at">最近扫描</th>
+                                        <th data-column="local_account_summary">本地账号</th>
+                                        <th data-column="row_actions">操作</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="cpa-credential-table-body">
+                                    <tr>
+                                        <td colspan="7">当前范围内暂无远端凭据。</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                        </div>
+                    </section>
+                </section>
+
+                <aside class="cpa-detail-column">
+                    <section id="cpa-detail-panel" class="card cpa-shell-card">
+                        <div class="card-header">
+                            <div>
+                                <h3>详情面板</h3>
+                                <p>右侧详情层会展示身份信息、核心状态、操作入口和关联摘要。</p>
+                            </div>
+                        </div>
+                        <div class="card-body">
+                            <div id="cpa-detail-layer-stack" class="cpa-detail-layer-stack">
+                                <section class="cpa-detail-layer" data-detail-layer="credential-identity">
+                                    <h4>身份头部</h4>
+                                    <dl class="cpa-detail-kv">
+                                        <dt>凭据</dt><dd data-detail-field="credential_id">-</dd>
+                                        <dt>服务</dt><dd data-detail-field="service_name">-</dd>
+                                        <dt>状态</dt><dd data-detail-field="status">-</dd>
+                                        <dt>配额</dt><dd data-detail-field="quota_status">-</dd>
+                                        <dt>扫描时间</dt><dd data-detail-field="last_scanned_at">-</dd>
+                                    </dl>
+                                </section>
+                                <section class="cpa-detail-layer" data-detail-layer="credential-core-status">
+                                    <h4>核心状态与动作</h4>
+                                    <dl class="cpa-detail-kv">
+                                        <dt>状态摘要</dt><dd data-detail-field="detail_status_summary">-</dd>
+                                        <dt>默认动作</dt><dd data-detail-field="detail_default_action">-</dd>
+                                    </dl>
+                                </section>
+                                <section class="cpa-detail-layer" data-detail-layer="credential-quick-actions">
+                                    <h4>快捷动作</h4>
+                                    <div class="cpa-detail-action-row">
+                                        <button type="button" class="cpa-detail-action-button" data-detail-action="scan-single">单条扫描</button>
+                                        <button type="button" class="cpa-detail-action-button" data-detail-action="delete-single">删除</button>
+                                        <button type="button" class="cpa-detail-action-button" data-detail-action="disable-single">禁用</button>
+                                    </div>
+                                </section>
+                                <section class="cpa-detail-layer" data-detail-layer="credential-local-account">
+                                    <h4>本地账号辅助摘要</h4>
+                                    <p data-detail-field="local_account_summary">-</p>
+                                </section>
+                                <section class="cpa-detail-layer" data-detail-layer="credential-recent-logs">
+                                    <h4>最近日志摘录</h4>
+                                    <ul class="cpa-detail-log-list" data-detail-field="recent_log_excerpt">
+                                        <li>暂无日志摘录。</li>
+                                    </ul>
+                                    <a href="#" class="cpa-detail-log-link" data-detail-action="view-logs">查看日志</a>
+                                </section>
+                            </div>
+                        </div>
+                    </section>
+                </aside>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/js/theme.js?v={{ static_version }}"></script>
+    <script src="/static/js/cpa_workbench.js?v={{ static_version }}"></script>
+</body>
+</html>

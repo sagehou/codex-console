@@ -5,6 +5,7 @@ API 路由模块
 from fastapi import APIRouter
 
 from .accounts import router as accounts_router
+from .cpa_workbench import router as cpa_workbench_router
 from .registration import router as registration_router
 from .settings import router as settings_router
 from .email import router as email_services_router
@@ -25,6 +26,7 @@ api_router.include_router(email_services_router, prefix="/email-services", tags=
 api_router.include_router(payment_router, prefix="/payment", tags=["payment"])
 api_router.include_router(cliproxy_router, prefix="/cliproxy-environments", tags=["cliproxy-environments"])
 api_router.include_router(cliproxy_router, prefix="/cliproxy", tags=["cliproxy"])
+api_router.include_router(cpa_workbench_router, prefix="/cpa", tags=["cpa"])
 api_router.include_router(audit_router, prefix="/audit", tags=["audit"])
 api_router.include_router(cpa_services_router, prefix="/cpa-services", tags=["cpa-services"])
 api_router.include_router(sub2api_services_router, prefix="/sub2api-services", tags=["sub2api-services"])

@@ -14,6 +14,8 @@ from sqlalchemy.exc import IntegrityError
 from .models import (
     Account,
     BatchSubscriptionTask,
+    CpaWorkbenchTask,
+    CpaRemoteCredentialSnapshot,
     EmailService,
     RegistrationTask,
     Setting,
@@ -33,6 +35,13 @@ BATCH_SUBSCRIPTION_ACTIVE_STATUSES = {"queued", "running"}
 BATCH_SUBSCRIPTION_TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 BATCH_SUBSCRIPTION_TASK_RETENTION_LIMIT = 50
 BATCH_SUBSCRIPTION_LOG_RETENTION_LIMIT = 500
+
+CPA_WORKBENCH_SCAN_TASK_TYPE = "scan"
+CPA_WORKBENCH_ACTION_TASK_TYPE = "action"
+CPA_WORKBENCH_ACTIVE_STATUSES = {"queued", "running"}
+CPA_SCAN_DEFAULT_CONCURRENCY = 2
+CPA_DELETE_DEFAULT_CONCURRENCY = 2
+CPA_DISABLE_DEFAULT_CONCURRENCY = 2
 
 
 def build_batch_subscription_owner_key(session_id: str) -> str:
@@ -73,6 +82,316 @@ def build_batch_subscription_request_key(
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def normalize_cpa_workbench_service_ids(service_ids: Iterable[int]) -> List[int]:
+    return sorted({int(service_id) for service_id in service_ids})
+
+
+def normalize_cpa_workbench_credential_ids(credential_ids: Optional[Iterable[str]]) -> List[str]:
+    if not credential_ids:
+        return []
+    return sorted({str(credential_id) for credential_id in credential_ids if str(credential_id)})
+
+
+def build_cpa_scan_task_scope_key(*, service_ids: Iterable[int], credential_ids: Optional[Iterable[str]] = None) -> str:
+    normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+    normalized_credential_ids = normalize_cpa_workbench_credential_ids(credential_ids)
+    credential_scope = f":{','.join(normalized_credential_ids)}" if normalized_credential_ids else ""
+    return f"scan:{','.join(str(service_id) for service_id in normalized_service_ids)}{credential_scope}"
+
+
+def build_cpa_action_task_scope_key(*, service_ids: Iterable[int], quota_action: str, credential_ids: Optional[Iterable[str]] = None) -> str:
+    normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+    normalized_credential_ids = normalize_cpa_workbench_credential_ids(credential_ids)
+    credential_scope = f":{','.join(normalized_credential_ids)}" if normalized_credential_ids else ""
+    return f"action:{quota_action}:{','.join(str(service_id) for service_id in normalized_service_ids)}{credential_scope}"
+
+
+def calculate_cpa_workbench_progress_percent(task: CpaWorkbenchTask) -> int:
+    total_count = max(int(task.total_count or 0), 0)
+    processed_count = max(int(task.processed_count or 0), 0)
+    if total_count <= 0:
+        return 0
+    return min(100, round((processed_count * 100) / total_count))
+
+
+def serialize_cpa_workbench_task(task: CpaWorkbenchTask) -> Dict[str, Any]:
+    return {
+        "task_id": str(task.id),
+        "type": task.task_type,
+        "status": task.status,
+        "total": int(task.total_count or 0),
+        "processed": int(task.processed_count or 0),
+        "current_item": task.current_item,
+        "progress_percent": calculate_cpa_workbench_progress_percent(task),
+        "logs": task.get_log_lines(),
+        "stats": dict(task.stats_json or {}),
+    }
+
+
+def create_cpa_scan_task(
+    db: Session,
+    *,
+    owner_session_id: str,
+    service_ids: Iterable[int],
+    credential_ids: Optional[Iterable[str]] = None,
+    concurrency: int = CPA_SCAN_DEFAULT_CONCURRENCY,
+) -> CpaWorkbenchTask:
+    normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+    normalized_credential_ids = normalize_cpa_workbench_credential_ids(credential_ids)
+    if not normalized_service_ids:
+        raise ValueError("service_ids must not be empty")
+
+    normalized_concurrency = max(int(concurrency or CPA_SCAN_DEFAULT_CONCURRENCY), 1)
+
+    task = CpaWorkbenchTask(
+        task_type=CPA_WORKBENCH_SCAN_TASK_TYPE,
+        owner_session_id=owner_session_id,
+        scope_key=build_cpa_scan_task_scope_key(
+            service_ids=normalized_service_ids,
+            credential_ids=normalized_credential_ids,
+        ),
+        status="queued",
+        total_count=len(normalized_credential_ids) if normalized_credential_ids else len(normalized_service_ids),
+        processed_count=0,
+        current_item=None,
+        log_lines="",
+        stats_json={
+            "service_ids": normalized_service_ids,
+            "service_count": len(normalized_service_ids),
+            "scan_concurrency": normalized_concurrency,
+            **({"credential_ids": normalized_credential_ids} if normalized_credential_ids else {}),
+        },
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def _serialize_cpa_action_snapshot(snapshot: CpaRemoteCredentialSnapshot, *, action: str) -> Dict[str, Any]:
+    return {
+        "service_id": int(snapshot.service_id),
+        "credential_id": str(snapshot.credential_id),
+        "status": str(snapshot.status),
+        "quota_status": str(snapshot.quota_status),
+        "action": action,
+    }
+
+
+def list_cpa_actionable_snapshot_actions(
+    db: Session,
+    *,
+    service_ids: Iterable[int],
+    credential_ids: Optional[Iterable[str]] = None,
+    quota_action: str = "disable",
+) -> List[Dict[str, Any]]:
+    normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+    normalized_credential_ids = normalize_cpa_workbench_credential_ids(credential_ids)
+    if not normalized_service_ids:
+        return []
+
+    normalized_quota_action = "delete" if quota_action == "delete" else "disable"
+    rows = (
+        db.query(CpaRemoteCredentialSnapshot)
+        .filter(CpaRemoteCredentialSnapshot.service_id.in_(normalized_service_ids))
+        .filter(CpaRemoteCredentialSnapshot.status.in_(["expired", "quota_limited"]))
+        .order_by(asc(CpaRemoteCredentialSnapshot.service_id), asc(CpaRemoteCredentialSnapshot.credential_id))
+    )
+    if normalized_credential_ids:
+        rows = rows.filter(CpaRemoteCredentialSnapshot.credential_id.in_(normalized_credential_ids))
+    rows = rows.all()
+
+    actions: List[Dict[str, Any]] = []
+    for row in rows:
+        if normalized_credential_ids:
+            action = normalized_quota_action
+        else:
+            action = "delete" if row.status == "expired" else normalized_quota_action
+        actions.append(_serialize_cpa_action_snapshot(row, action=action))
+    return actions
+
+
+def create_cpa_action_task(
+    db: Session,
+    *,
+    owner_session_id: str,
+    service_ids: Iterable[int],
+    credential_ids: Optional[Iterable[str]] = None,
+    quota_action: str = "disable",
+    delete_concurrency: int = CPA_DELETE_DEFAULT_CONCURRENCY,
+    disable_concurrency: int = CPA_DISABLE_DEFAULT_CONCURRENCY,
+) -> CpaWorkbenchTask:
+    normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+    normalized_credential_ids = normalize_cpa_workbench_credential_ids(credential_ids)
+    if not normalized_service_ids:
+        raise ValueError("service_ids must not be empty")
+
+    normalized_quota_action = "delete" if quota_action == "delete" else "disable"
+    actions = list_cpa_actionable_snapshot_actions(
+        db,
+        service_ids=normalized_service_ids,
+        credential_ids=normalized_credential_ids,
+        quota_action=normalized_quota_action,
+    )
+    if not actions:
+        raise ValueError("No actionable CPA snapshots found")
+
+    normalized_delete_concurrency = max(int(delete_concurrency or CPA_DELETE_DEFAULT_CONCURRENCY), 1)
+    normalized_disable_concurrency = max(int(disable_concurrency or CPA_DISABLE_DEFAULT_CONCURRENCY), 1)
+    delete_count = sum(1 for item in actions if item["action"] == "delete")
+    disable_count = sum(1 for item in actions if item["action"] == "disable")
+
+    task = CpaWorkbenchTask(
+        task_type=CPA_WORKBENCH_ACTION_TASK_TYPE,
+        owner_session_id=owner_session_id,
+        scope_key=build_cpa_action_task_scope_key(
+            service_ids=normalized_service_ids,
+            quota_action=normalized_quota_action,
+            credential_ids=normalized_credential_ids,
+        ),
+        status="queued",
+        total_count=len(actions),
+        processed_count=0,
+        current_item=None,
+        log_lines="",
+        stats_json={
+            "service_ids": normalized_service_ids,
+            "action_count": len(actions),
+            "delete_count": delete_count,
+            "disable_count": disable_count,
+            "delete_concurrency": normalized_delete_concurrency,
+            "disable_concurrency": normalized_disable_concurrency,
+            "quota_action": normalized_quota_action,
+            "actions": actions,
+            **({"credential_ids": normalized_credential_ids} if normalized_credential_ids else {}),
+        },
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def start_cpa_workbench_task(db: Session, task_id: int) -> Optional[CpaWorkbenchTask]:
+    task = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.id == task_id).first()
+    if task is None:
+        return None
+    if task.status != "queued":
+        return task
+
+    now = _utcnow()
+    task.status = "running"
+    task.started_at = task.started_at or now
+    task.updated_at = now
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def update_cpa_workbench_task_progress(
+    db: Session,
+    task_id: int,
+    *,
+    processed_count: Optional[int] = None,
+    total_count: Optional[int] = None,
+    current_item: Optional[str] = None,
+    stats_json: Optional[Dict[str, Any]] = None,
+) -> Optional[CpaWorkbenchTask]:
+    task = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.id == task_id).first()
+    if task is None:
+        return None
+
+    if processed_count is not None:
+        task.processed_count = max(0, int(processed_count))
+    if total_count is not None:
+        task.total_count = max(0, int(total_count))
+    if current_item is not None:
+        task.current_item = current_item
+    if stats_json:
+        merged_stats = dict(task.stats_json or {})
+        merged_stats.update(stats_json)
+        task.stats_json = merged_stats
+    task.updated_at = _utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def append_cpa_workbench_task_logs(
+    db: Session,
+    task_id: int,
+    lines: Iterable[str],
+) -> Optional[CpaWorkbenchTask]:
+    task = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.id == task_id).first()
+    if task is None:
+        return None
+
+    existing_lines = task.get_log_lines()
+    existing_lines.extend(str(line) for line in lines)
+    task.set_log_lines(existing_lines)
+    task.updated_at = _utcnow()
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def finalize_cpa_workbench_task(
+    db: Session,
+    task_id: int,
+    *,
+    status: str,
+    current_item: Optional[str] = None,
+) -> Optional[CpaWorkbenchTask]:
+    task = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.id == task_id).first()
+    if task is None:
+        return None
+
+    task.status = status
+    task.current_item = current_item
+    task.completed_at = _utcnow()
+    task.updated_at = task.completed_at
+    db.commit()
+    db.refresh(task)
+    return task
+
+
+def get_cpa_workbench_task_by_id(
+    db: Session,
+    task_id: int,
+    *,
+    owner_session_id: Optional[str] = None,
+) -> Optional[CpaWorkbenchTask]:
+    query = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.id == task_id)
+    if owner_session_id is not None:
+        query = query.filter(CpaWorkbenchTask.owner_session_id == owner_session_id)
+    return query.first()
+
+
+def get_latest_active_cpa_workbench_task(
+    db: Session,
+    *,
+    owner_session_id: str,
+    task_type: Optional[str] = None,
+    service_ids: Optional[Iterable[int]] = None,
+) -> Optional[CpaWorkbenchTask]:
+    query = db.query(CpaWorkbenchTask).filter(CpaWorkbenchTask.owner_session_id == owner_session_id)
+    query = query.filter(CpaWorkbenchTask.status.in_(CPA_WORKBENCH_ACTIVE_STATUSES))
+    if task_type is not None:
+        query = query.filter(CpaWorkbenchTask.task_type == task_type)
+
+    normalized_service_ids = None
+    if service_ids is not None:
+        normalized_service_ids = normalize_cpa_workbench_service_ids(service_ids)
+
+    for task in query.order_by(desc(CpaWorkbenchTask.id)).all():
+        if normalized_service_ids is None:
+            return task
+        task_service_ids = normalize_cpa_workbench_service_ids((task.stats_json or {}).get("service_ids") or [])
+        if task_service_ids == normalized_service_ids:
+            return task
+    return None
 
 
 def _apply_batch_subscription_task_retention(db: Session, owner_key: str) -> None:
@@ -1190,6 +1509,280 @@ def serialize_cliproxy_selectable_cpa_service(service: CpaService) -> Dict[str, 
 def get_cliproxy_selectable_cpa_services(db: Session) -> List[Dict[str, Any]]:
     services = get_cpa_services(db, enabled=True)
     return [serialize_cliproxy_selectable_cpa_service(service) for service in services]
+
+
+def serialize_cpa_workbench_service_selector_item(service: CpaService) -> Dict[str, Any]:
+    missing_fields = get_cpa_service_missing_required_fields(service)
+    if not service.enabled:
+        state = "disabled"
+        selectable = False
+        status_message = "Disabled in settings"
+    elif missing_fields:
+        state = "enabled_incomplete"
+        selectable = False
+        status_message = "Configuration incomplete"
+    else:
+        state = "enabled_usable"
+        selectable = True
+        status_message = "Ready"
+
+    return {
+        "service_id": service.id,
+        "service_name": service.name,
+        "state": state,
+        "selectable": selectable,
+        "status_message": status_message,
+    }
+
+
+def get_cpa_workbench_service_selector_data(db: Session) -> Dict[str, Any]:
+    services = [serialize_cpa_workbench_service_selector_item(service) for service in get_cpa_services(db)]
+    selected_service_ids = [service["service_id"] for service in services if service["selectable"]]
+
+    payload: Dict[str, Any] = {
+        "services": services,
+        "selected_service_ids": selected_service_ids,
+    }
+    if not services:
+        payload["empty_state"] = {
+            "code": "no_configured_services",
+            "message": "Configure at least one CPA service to start managing remote credentials.",
+        }
+    return payload
+
+
+def _serialize_cpa_local_account_summary(account: Optional[Account]) -> Optional[Dict[str, Any]]:
+    if account is None:
+        return None
+    return {
+        "account_id": account.id,
+        "email": account.email,
+        "status": account.status,
+    }
+
+
+def upsert_cpa_remote_credential_snapshot(
+    db: Session,
+    *,
+    service_id: int,
+    credential_id: str,
+    status: str,
+    quota_status: str,
+    summary_json: Optional[Dict[str, Any]] = None,
+    last_scanned_at: Optional[datetime] = None,
+    local_account_id: Optional[int] = None,
+) -> CpaRemoteCredentialSnapshot:
+    snapshot = (
+        db.query(CpaRemoteCredentialSnapshot)
+        .filter(CpaRemoteCredentialSnapshot.service_id == service_id)
+        .filter(CpaRemoteCredentialSnapshot.credential_id == credential_id)
+        .first()
+    )
+
+    if snapshot is None:
+        snapshot = CpaRemoteCredentialSnapshot(
+            service_id=service_id,
+            credential_id=credential_id,
+            local_account_id=local_account_id,
+            status=status,
+            quota_status=quota_status,
+            summary_json=summary_json,
+            last_scanned_at=last_scanned_at,
+        )
+        db.add(snapshot)
+    else:
+        snapshot.local_account_id = local_account_id
+        snapshot.status = status
+        snapshot.quota_status = quota_status
+        snapshot.summary_json = summary_json
+        snapshot.last_scanned_at = last_scanned_at
+
+    db.flush()
+    return snapshot
+
+
+def _build_cpa_inventory_summary(rows: List[CpaRemoteCredentialSnapshot]) -> Dict[str, int]:
+    summary = {
+        "total": len(rows),
+        "valid_count": 0,
+        "expired_count": 0,
+        "quota_count": 0,
+        "error_count": 0,
+        "unknown_count": 0,
+    }
+    for row in rows:
+        if row.status == "valid":
+            summary["valid_count"] += 1
+        elif row.status == "expired":
+            summary["expired_count"] += 1
+        elif row.status == "quota_limited":
+            summary["quota_count"] += 1
+        elif row.status == "error":
+            summary["error_count"] += 1
+        else:
+            summary["unknown_count"] += 1
+    return summary
+
+
+def get_cpa_remote_credential_summary(
+    db: Session,
+    *,
+    service_ids: List[int],
+    status: Optional[str] = None,
+) -> Dict[str, int]:
+    if not service_ids:
+        return _build_cpa_inventory_summary([])
+
+    query = (
+        db.query(CpaRemoteCredentialSnapshot)
+        .filter(CpaRemoteCredentialSnapshot.service_id.in_(service_ids))
+    )
+    if status:
+        query = query.filter(CpaRemoteCredentialSnapshot.status == status)
+
+    return _build_cpa_inventory_summary(query.all())
+
+
+def list_cpa_remote_credential_snapshots(
+    db: Session,
+    *,
+    service_ids: List[int],
+    status: Optional[str] = None,
+) -> Dict[str, Any]:
+    if not service_ids:
+        return {
+            "rows": [],
+            "counts": {"returned": 0, "total": 0},
+        }
+
+    query = (
+        db.query(CpaRemoteCredentialSnapshot)
+        .filter(CpaRemoteCredentialSnapshot.service_id.in_(service_ids))
+        .order_by(asc(CpaRemoteCredentialSnapshot.service_id), asc(CpaRemoteCredentialSnapshot.credential_id))
+    )
+    if status:
+        query = query.filter(CpaRemoteCredentialSnapshot.status == status)
+
+    rows = query.all()
+    services = {
+        service.id: service.name
+        for service in db.query(CpaService).filter(CpaService.id.in_(service_ids)).all()
+    }
+
+    serialized_rows = [
+        {
+            "service_id": row.service_id,
+            "credential_id": row.credential_id,
+            "service_name": services.get(row.service_id, ""),
+            "status": row.status,
+            "quota_status": row.quota_status,
+            "last_scanned_at": row.last_scanned_at.isoformat() if row.last_scanned_at else None,
+        }
+        for row in rows
+    ]
+
+    return {
+        "rows": serialized_rows,
+        "counts": {"returned": len(serialized_rows), "total": len(serialized_rows)},
+    }
+
+
+def get_cpa_remote_credential_snapshot(
+    db: Session,
+    *,
+    service_id: int,
+    credential_id: str,
+) -> Optional[CpaRemoteCredentialSnapshot]:
+    return (
+        db.query(CpaRemoteCredentialSnapshot)
+        .filter(CpaRemoteCredentialSnapshot.service_id == int(service_id))
+        .filter(CpaRemoteCredentialSnapshot.credential_id == str(credential_id))
+        .first()
+    )
+
+
+def serialize_cpa_remote_credential_detail(
+    db: Session,
+    *,
+    service_id: int,
+    credential_id: str,
+) -> Optional[Dict[str, Any]]:
+    snapshot = get_cpa_remote_credential_snapshot(db, service_id=service_id, credential_id=credential_id)
+    if snapshot is None:
+        return None
+
+    service = get_cpa_service_by_id(db, int(service_id))
+    summary_json = dict(snapshot.summary_json or {})
+    recent_log_excerpt = [str(line) for line in (summary_json.get("recent_log_excerpt") or []) if str(line)]
+    if snapshot.status == "expired":
+        default_action = "delete"
+    elif snapshot.status == "quota_limited":
+        default_action = "disable"
+    else:
+        default_action = "scan"
+
+    return {
+        "service_id": int(snapshot.service_id),
+        "credential_id": str(snapshot.credential_id),
+        "service_name": service.name if service is not None else "",
+        "status": str(snapshot.status),
+        "quota_status": str(snapshot.quota_status),
+        "last_scanned_at": snapshot.last_scanned_at.isoformat() if snapshot.last_scanned_at else None,
+        "local_account_summary": _serialize_cpa_local_account_summary(snapshot.account),
+        "status_summary": f"{snapshot.status} / {snapshot.quota_status}",
+        "default_action": default_action,
+        "recent_log_excerpt": recent_log_excerpt,
+        "view_logs_target": f"/api/cpa/credentials/{int(snapshot.service_id)}/{str(snapshot.credential_id)}/logs",
+    }
+
+
+def serialize_cpa_remote_credential_logs(
+    db: Session,
+    *,
+    service_id: int,
+    credential_id: str,
+) -> Optional[Dict[str, Any]]:
+    snapshot = get_cpa_remote_credential_snapshot(db, service_id=service_id, credential_id=credential_id)
+    if snapshot is None:
+        return None
+
+    service = get_cpa_service_by_id(db, int(service_id))
+    summary_json = dict(snapshot.summary_json or {})
+    logs = [str(line) for line in (summary_json.get("recent_log_excerpt") or []) if str(line)]
+
+    return {
+        "service_id": int(snapshot.service_id),
+        "credential_id": str(snapshot.credential_id),
+        "service_name": service.name if service is not None else "",
+        "status": str(snapshot.status),
+        "quota_status": str(snapshot.quota_status),
+        "last_scanned_at": snapshot.last_scanned_at.isoformat() if snapshot.last_scanned_at else None,
+        "logs": logs,
+        "history": [
+            {
+                "kind": "recent_log_excerpt",
+                "lines": logs,
+            }
+        ] if logs else [],
+    }
+
+
+def delete_cpa_remote_credential_snapshot(
+    db: Session,
+    *,
+    service_id: int,
+    credential_id: str,
+) -> bool:
+    snapshot = get_cpa_remote_credential_snapshot(
+        db,
+        service_id=service_id,
+        credential_id=credential_id,
+    )
+    if snapshot is None:
+        return False
+    db.delete(snapshot)
+    db.commit()
+    return True
 
 
 def get_cliproxy_environment_for_cpa_service(db: Session, service_id: int) -> Optional[CLIProxyAPIEnvironment]:

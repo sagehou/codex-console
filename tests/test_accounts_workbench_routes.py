@@ -347,7 +347,7 @@ def test_accounts_list_limits_primary_columns_and_keeps_workbench_summaries_visi
     assert 'data-primary-column="batch-actions"' not in response.text
     assert 'id="detail-subscription-quota"' in response.text
     assert 'id="detail-automation-trace"' in response.text
-    assert 'id="detail-cliproxy-summary"' in response.text
+    assert 'id="detail-cpa-summary"' in response.text
 
 
 def test_accounts_low_frequency_fields_render_only_in_detail_area(monkeypatch, tmp_path):
@@ -373,6 +373,28 @@ def test_accounts_low_frequency_fields_render_only_in_detail_area(monkeypatch, t
     assert 'data-primary-column="remote-environment"' not in response.text
     assert 'data-primary-column="upload-target"' not in response.text
     assert 'data-primary-column="email-service"' not in response.text
+
+
+def test_accounts_page_only_shows_cpa_summary_and_jump(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/accounts", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="detail-cpa-summary"' in response.text
+    assert 'CPA 摘要与跳转' in response.text
+    assert 'href="/cpa"' in response.text
+    assert '打开 CPA 管理' not in response.text
+    assert '复制 remote file' not in response.text
+    assert 'data-format="cpa"' not in response.text
+    assert 'id="batch-upload-cpa-item"' not in response.text
+    assert 'id="cpa-service-modal"' not in response.text
+    assert '上传到 CPA' not in response.text
+    assert 'id="detail-cliproxy-summary"' not in response.text
+    assert 'CLIProxy 摘要与跳转' not in response.text
 
 
 def test_completed_batch_check_refreshes_subscription_summaries_for_affected_accounts(monkeypatch, tmp_path):

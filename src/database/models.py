@@ -460,6 +460,56 @@ class RemoteAuthInventory(Base):
     account = relationship('Account')
 
 
+class CpaRemoteCredentialSnapshot(Base):
+    """CPA 远端凭据快照表"""
+    __tablename__ = 'cpa_remote_credential_snapshots'
+    __table_args__ = (
+        UniqueConstraint('service_id', 'credential_id', name='uq_cpa_remote_credential_service_credential'),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    service_id = Column(Integer, ForeignKey('cpa_services.id'), nullable=False, index=True)
+    credential_id = Column(String(255), nullable=False)
+    local_account_id = Column(Integer, ForeignKey('accounts.id'), index=True)
+    status = Column(String(50), nullable=False, default='unknown')
+    quota_status = Column(String(50), nullable=False, default='unknown')
+    summary_json = Column(JSONEncodedDict)
+    last_scanned_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    service = relationship('CpaService')
+    account = relationship('Account')
+
+
+class CpaWorkbenchTask(Base):
+    """CPA 工作台任务表"""
+    __tablename__ = 'cpa_workbench_tasks'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    task_type = Column(String(32), nullable=False, index=True)
+    owner_session_id = Column(String(255), nullable=False, index=True)
+    scope_key = Column(String(255), nullable=False, index=True)
+    status = Column(String(20), nullable=False, default='queued', index=True)
+    total_count = Column(Integer, nullable=False, default=0)
+    processed_count = Column(Integer, nullable=False, default=0)
+    current_item = Column(String(255))
+    log_lines = Column(Text)
+    stats_json = Column(JSONEncodedDict)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    started_at = Column(DateTime)
+    completed_at = Column(DateTime)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    def get_log_lines(self) -> List[str]:
+        if not self.log_lines:
+            return []
+        return self.log_lines.splitlines()
+
+    def set_log_lines(self, lines: List[str]) -> None:
+        self.log_lines = "\n".join(lines)
+
+
 class MaintenanceRun(Base):
     """维护运行记录表"""
     __tablename__ = 'maintenance_runs'

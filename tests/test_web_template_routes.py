@@ -2,6 +2,9 @@ from pathlib import Path
 import importlib
 
 from fastapi.testclient import TestClient
+import src.database.session as session_module
+from src.database import crud
+from src.database.init_db import initialize_database
 
 web_app_module = importlib.import_module("src.web.app")
 web_auth_module = importlib.import_module("src.web.auth")
@@ -55,11 +58,19 @@ def build_template_test_client(monkeypatch, tmp_path: Path) -> TestClient:
         (REPO_ROOT / "templates" / "cliproxy.html").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    cpa_template = REPO_ROOT / "templates" / "cpa_workbench.html"
+    if cpa_template.exists():
+        (templates_dir / "cpa_workbench.html").write_text(
+            cpa_template.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
 
     monkeypatch.setattr(web_app_module, "STATIC_DIR", static_dir)
     monkeypatch.setattr(web_app_module, "TEMPLATES_DIR", templates_dir)
     monkeypatch.setattr(web_app_module, "get_settings", lambda: make_dummy_settings(project_root))
     monkeypatch.setattr(web_auth_module, "get_settings", lambda: make_dummy_settings(project_root))
+    monkeypatch.setattr(session_module, "_db_manager", None)
+    initialize_database(f"sqlite:///{project_root / 'test.db'}")
 
     app = web_app_module.create_app()
     return TestClient(app)
@@ -82,7 +93,7 @@ def test_accounts_page_renders_with_new_template_response_signature(monkeypatch,
     assert 'data-detail-layer="subscription-quota"' in response.text
     assert 'data-detail-layer="core-ops"' in response.text
     assert 'data-detail-layer="automation-trace"' in response.text
-    assert 'data-detail-layer="cliproxy-summary"' in response.text
+    assert 'data-detail-layer="cpa-summary"' in response.text
 
 
 def test_accounts_template_exposes_batch_check_progress_panel_markers(monkeypatch, tmp_path):
@@ -238,6 +249,103 @@ def test_cliproxy_nav_entry_remains_visible_even_without_cpa_services(monkeypatc
 
     assert response.status_code == 200
     assert '<a href="/cliproxy" class="nav-link active">CLIProxyAPI</a>' in response.text
+
+
+def test_cpa_workbench_route_renders(monkeypatch, tmp_path):
+    client = build_template_test_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/cpa"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/cpa", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert '<a href="/cpa" class="nav-link active">CPA管理</a>' in response.text
+    assert 'id="cpa-workbench"' in response.text
+    assert 'id="cpa-stats-panel"' in response.text
+    assert 'id="cpa-task-panel"' in response.text
+    assert 'id="cpa-credential-list-panel"' in response.text
+    assert 'id="cpa-detail-panel"' in response.text
+
+
+def test_cpa_nav_entry_is_visible_on_existing_non_cpa_page(monkeypatch, tmp_path):
+    client = build_template_test_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/accounts"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/accounts", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert '<a href="/cpa" class="nav-link">CPA管理</a>' in response.text
+
+
+def test_cpa_workbench_route_has_layout_skeleton_regions(monkeypatch, tmp_path):
+    client = build_template_test_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/cpa"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/cpa", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="cpa-shell-top"' in response.text
+    assert 'id="cpa-shell-bottom"' in response.text
+    assert 'id="cpa-stats-region"' in response.text
+    assert 'id="cpa-active-task-region"' in response.text
+    assert 'id="cpa-credential-list-region"' in response.text
+    assert 'id="cpa-detail-layer-stack"' in response.text
+    assert 'data-detail-layer="credential-identity"' in response.text
+    assert 'data-detail-layer="credential-core-status"' in response.text
+    assert 'data-detail-layer="credential-quick-actions"' in response.text
+    assert 'data-detail-layer="credential-local-account"' in response.text
+    assert 'data-detail-layer="credential-recent-logs"' in response.text
+    assert 'CLIProxyAPI 管理台' not in response.text
+
+
+def test_cpa_page_bootstrap_does_not_include_cliproxy_task_shape(monkeypatch, tmp_path):
+    client = build_template_test_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/cpa"}, follow_redirects=False)
+    cookie = login_response.cookies.get("webui_auth")
+
+    response = client.get("/cpa", cookies={"webui_auth": cookie})
+
+    assert response.status_code == 200
+    assert 'id="cpa-latest-active-task-bootstrap"' in response.text
+    assert 'aggregate_key' not in response.text
+    assert 'run_type' not in response.text
+
+
+def test_cpa_page_bootstrap_matches_scoped_cpa_latest_active_task(monkeypatch, tmp_path):
+    client = build_template_test_client(monkeypatch, tmp_path)
+
+    login_response = client.post("/login", data={"password": "password", "next": "/cpa"}, follow_redirects=False)
+    auth_cookie = login_response.cookies.get("webui_auth")
+    session_cookie = login_response.cookies.get("session_id")
+    session_id = session_cookie.split(".", 1)[0]
+
+    with session_module.get_db() as db:
+        service = crud.create_cpa_service(
+            db,
+            name="bootstrap-service",
+            api_url="https://bootstrap.example.com",
+            api_token="bootstrap-token",
+            enabled=True,
+            priority=1,
+        )
+        service_id = service.id
+        task = crud.create_cpa_scan_task(db, owner_session_id=session_id, service_ids=[service_id])
+        task_id = task.id
+        crud.start_cpa_workbench_task(db, task.id)
+
+    response = client.get("/cpa", cookies={"webui_auth": auth_cookie, "session_id": session_cookie})
+
+    assert response.status_code == 200
+    assert f'"task_id": "{task_id}"' in response.text
+    assert '"type": "scan"' in response.text
+    assert f'"service_ids": [{service_id}]' in response.text
+    assert 'aggregate_key' not in response.text
 
 
 def test_cliproxy_page_renders_no_available_cpa_services_state(monkeypatch, tmp_path):
