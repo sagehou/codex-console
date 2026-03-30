@@ -335,8 +335,15 @@ def _resolve_temp_mail_config_for_account(db, account: Account) -> Optional[Dict
     matched = None
     for svc in services:
         cfg = dict(svc.config or {})
-        cfg_domain = str(cfg.get("domain") or cfg.get("default_domain") or "").strip().lower()
-        if cfg_domain and account_domain and cfg_domain == account_domain:
+        cfg_domains = []
+        for value in cfg.get("domains") or []:
+            text = str(value or "").strip().lower()
+            if text:
+                cfg_domains.append(text)
+        fallback_domain = str(cfg.get("domain") or cfg.get("default_domain") or "").strip().lower()
+        if fallback_domain:
+            cfg_domains.append(fallback_domain)
+        if account_domain and account_domain in cfg_domains:
             matched = svc
             break
     if matched is None:

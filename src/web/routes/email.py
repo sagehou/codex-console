@@ -129,6 +129,48 @@ def _normalize_outlook_email_config(service_type: str, config: Optional[Dict[str
     return normalized
 
 
+def _normalize_temp_mail_domains(value: Any) -> List[str]:
+    if value is None:
+        return []
+
+    raw_items: List[str] = []
+    if isinstance(value, str):
+        for chunk in value.replace(";", "\n").replace(",", "\n").splitlines():
+            raw_items.append(chunk)
+    elif isinstance(value, (list, tuple, set)):
+        for item in value:
+            if item is None:
+                continue
+            raw_items.extend(str(item).replace(";", "\n").replace(",", "\n").splitlines())
+    else:
+        raw_items = [str(value)]
+
+    domains: List[str] = []
+    seen = set()
+    for item in raw_items:
+        domain = str(item or "").strip().lstrip("@").lower()
+        if not domain or domain in seen:
+            continue
+        seen.add(domain)
+        domains.append(domain)
+    return domains
+
+
+def _normalize_service_config(service_type: str, config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    normalized = _normalize_outlook_email_config(service_type, config)
+    normalized_service_type = str(service_type or "").strip().lower()
+
+    if normalized_service_type in ("temp_mail", "cloudmail"):
+        domains = _normalize_temp_mail_domains(
+            normalized.get("domains") if "domains" in normalized else normalized.get("domain")
+        )
+        if domains:
+            normalized["domains"] = domains
+            normalized["domain"] = domains[0]
+
+    return normalized
+
+
 def service_to_response(service: EmailServiceModel) -> EmailServiceResponse:
     """转换服务模型为响应"""
     registration_status = None
@@ -256,8 +298,8 @@ async def get_service_types():
                 "config_fields": [
                     {"name": "base_url", "label": "Worker 地址", "required": True, "placeholder": "https://mail.example.com"},
                     {"name": "admin_password", "label": "Admin 密码", "required": True, "secret": True},
-                    {"name": "custom_auth", "label": "Custom Auth（可选）", "required": False, "secret": True},
-                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "example.com"},
+                    {"name": "custom_auth", "label": "Site Password（可选）", "required": False, "secret": True},
+                    {"name": "domains", "label": "邮箱域名列表", "required": True, "placeholder": "example.com"},
                     {"name": "enable_prefix", "label": "启用前缀", "required": False, "default": True},
                 ]
             },
@@ -268,8 +310,8 @@ async def get_service_types():
                 "config_fields": [
                     {"name": "base_url", "label": "Worker 地址", "required": True, "placeholder": "https://mail.example.com"},
                     {"name": "admin_password", "label": "Admin 密码", "required": True, "secret": True},
-                    {"name": "custom_auth", "label": "Custom Auth（可选）", "required": False, "secret": True},
-                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "example.com"},
+                    {"name": "custom_auth", "label": "Site Password（可选）", "required": False, "secret": True},
+                    {"name": "domains", "label": "邮箱域名列表", "required": True, "placeholder": "example.com"},
                     {"name": "enable_prefix", "label": "启用前缀", "required": False, "default": True},
                 ]
             },
@@ -374,7 +416,7 @@ async def create_email_service(request: EmailServiceCreate):
         raise HTTPException(status_code=400, detail=f"无效的服务类型: {request.service_type}")
 
     normalized_service_type = str(request.service_type or "").strip().lower()
-    normalized_config = _normalize_outlook_email_config(normalized_service_type, request.config)
+    normalized_config = _normalize_service_config(normalized_service_type, request.config)
     normalized_name = str(request.name or "").strip()
     if normalized_service_type == "outlook":
         normalized_email = str(normalized_config.get("email") or normalized_name).strip().lower()
@@ -425,7 +467,7 @@ async def update_email_service(service_id: int, request: EmailServiceUpdate):
             merged_config = {**current_config, **request.config}
             # 移除空值
             merged_config = {k: v for k, v in merged_config.items() if v}
-            merged_config = _normalize_outlook_email_config(service.service_type, merged_config)
+            merged_config = _normalize_service_config(service.service_type, merged_config)
             if (
                 str(service.service_type or "").strip().lower() == "outlook"
                 and request.name is None

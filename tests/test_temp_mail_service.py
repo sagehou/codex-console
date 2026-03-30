@@ -289,3 +289,48 @@ def test_get_verification_code_admin_unfiltered_fallback():
     code = service.get_verification_code(email="target@example.com", timeout=1)
 
     assert code == "135790"
+
+
+def test_create_email_randomly_uses_domain_list(monkeypatch):
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domains": ["alpha.example.com", "beta.example.com"],
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(
+            payload={
+                "address": "tester@beta.example.com",
+                "jwt": "jwt-123",
+            }
+        ),
+    ])
+    service.http_client = fake_client
+    monkeypatch.setattr("src.services.temp_mail.random.choice", lambda items: items[-1])
+
+    created = service.create_email()
+
+    assert created["email"] == "tester@beta.example.com"
+    assert fake_client.calls[0]["kwargs"]["json"]["domain"] == "beta.example.com"
+    assert service.config["domain"] == "alpha.example.com"
+    assert service.config["domains"] == ["alpha.example.com", "beta.example.com"]
+
+
+def test_make_request_always_sends_custom_auth_header_even_when_empty():
+    service = TempMailService({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "domain": "example.com",
+        "custom_auth": "",
+    })
+    fake_client = FakeHTTPClient([
+        FakeResponse(payload={"results": []}),
+    ])
+    service.http_client = fake_client
+
+    service._make_request("GET", "/admin/mails")
+
+    headers = fake_client.calls[0]["kwargs"]["headers"]
+    assert headers["x-admin-auth"] == "admin-secret"
+    assert "x-custom-auth" in headers
+    assert headers["x-custom-auth"] == ""

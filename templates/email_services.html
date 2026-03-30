@@ -247,8 +247,13 @@
                             <input type="password" id="custom-tm-admin-password" name="tm_admin_password" placeholder="x-admin-auth 密码">
                         </div>
                         <div class="form-group">
-                            <label for="custom-tm-domain">邮箱域名</label>
-                            <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com">
+                            <label for="custom-tm-site-password">Site Password</label>
+                            <input type="password" id="custom-tm-site-password" name="tm_site_password" placeholder="x-custom-auth">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-tm-domains">Domain List</label>
+                            <textarea id="custom-tm-domains" name="tm_domains" rows="3" placeholder="example.com&#10;mail.example.com"></textarea>
+                            <small style="color: var(--text-muted);">Separate with new lines, commas, or semicolons. One domain is chosen at random.</small>
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
@@ -383,8 +388,14 @@
                             <small style="color: var(--text-muted);">留空则保持原值不变</small>
                         </div>
                         <div class="form-group">
-                            <label for="edit-tm-domain">邮箱域名</label>
-                            <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com">
+                            <label for="edit-tm-site-password">Site Password</label>
+                            <input type="password" id="edit-tm-site-password" name="tm_site_password" placeholder="Leave blank to keep current">
+                            <small style="color: var(--text-muted);">Maps to the x-custom-auth header. Leave blank to keep the current value.</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-tm-domains">Domain List</label>
+                            <textarea id="edit-tm-domains" name="tm_domains" rows="3" placeholder="example.com&#10;mail.example.com"></textarea>
+                            <small style="color: var(--text-muted);">Separate with new lines, commas, or semicolons. One domain is chosen at random.</small>
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
@@ -527,7 +538,6 @@
     <script src="/static/js/email_services.js?v={{ static_version }}"></script>
 </body>
 </html>
-
 
 
 

@@ -8,6 +8,7 @@ import re
 import time
 import json
 import logging
+import random
 from datetime import datetime, timezone
 from email import message_from_string
 from email.header import decode_header, make_header
@@ -48,8 +49,14 @@ class TempMailService(BaseEmailService):
         """
         super().__init__(EmailServiceType.TEMP_MAIL, name)
 
-        required_keys = ["base_url", "admin_password", "domain"]
-        missing_keys = [key for key in required_keys if not (config or {}).get(key)]
+        required_keys = ["base_url", "admin_password"]
+        raw_config = dict(config or {})
+        missing_keys = [key for key in required_keys if not raw_config.get(key)]
+        normalized_domains = self._normalize_domains(
+            raw_config.get("domains") or raw_config.get("domain")
+        )
+        if not normalized_domains:
+            missing_keys.append("domains")
         if missing_keys:
             raise ValueError(f"缺少必需配置: {missing_keys}")
 
@@ -58,7 +65,9 @@ class TempMailService(BaseEmailService):
             "timeout": 30,
             "max_retries": 3,
         }
-        self.config = {**default_config, **(config or {})}
+        self.config = {**default_config, **raw_config}
+        self.config["domains"] = normalized_domains
+        self.config["domain"] = normalized_domains[0]
 
         # 不走代理，proxy_url=None
         http_config = RequestConfig(
@@ -73,6 +82,32 @@ class TempMailService(BaseEmailService):
         self._last_used_mail_ids: Dict[str, str] = {}
         # /admin/mails 接口对 limit 参数较严格，这里统一限制上限，避免 400 Invalid limit
         self._admin_mails_limit_max = 50
+
+    @staticmethod
+    def _normalize_domains(value: Any) -> List[str]:
+        if value is None:
+            return []
+
+        raw_items: List[str] = []
+        if isinstance(value, str):
+            raw_items = re.split(r"[\r\n,;]+", value)
+        elif isinstance(value, (list, tuple, set)):
+            for item in value:
+                if item is None:
+                    continue
+                raw_items.extend(re.split(r"[\r\n,;]+", str(item)))
+        else:
+            raw_items = [str(value)]
+
+        normalized: List[str] = []
+        seen = set()
+        for item in raw_items:
+            domain = str(item or "").strip().lstrip("@").lower()
+            if not domain or domain in seen:
+                continue
+            seen.add(domain)
+            normalized.append(domain)
+        return normalized
 
     def _normalize_admin_limit(self, value: Any, default: int = 50) -> int:
         try:
@@ -281,12 +316,10 @@ class TempMailService(BaseEmailService):
         """构造 admin 请求头"""
         headers = {
             "x-admin-auth": self.config["admin_password"],
+            "x-custom-auth": str(self.config.get("custom_auth") or "").strip(),
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
-        custom_auth = (self.config.get("custom_auth") or "").strip()
-        if custom_auth:
-            headers["x-custom-auth"] = custom_auth
         return headers
 
     def _extract_mails_from_response(self, response: Any) -> List[Dict[str, Any]]:
@@ -620,7 +653,6 @@ class TempMailService(BaseEmailService):
             - jwt: 用户级 JWT token
             - service_id: 同 email（用作标识）
         """
-        import random
         import string
 
         # 生成随机邮箱名
@@ -629,7 +661,15 @@ class TempMailService(BaseEmailService):
         suffix = ''.join(random.choices(string.ascii_lowercase, k=random.randint(1, 3)))
         name = letters + digits + suffix
 
-        domain = self.config["domain"]
+        domains = self._normalize_domains(
+            (config or {}).get("domains")
+            or (config or {}).get("domain")
+            or self.config.get("domains")
+            or self.config.get("domain")
+        )
+        if not domains:
+            raise EmailServiceError("TempMail missing configured domains")
+        domain = random.choice(domains)
         enable_prefix = self.config.get("enable_prefix", True)
 
         body = {

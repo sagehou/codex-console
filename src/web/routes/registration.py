@@ -220,6 +220,10 @@ def _normalize_email_service_config(
     elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.FREEMAIL):
         if 'default_domain' in normalized and 'domain' not in normalized:
             normalized['domain'] = normalized.pop('default_domain')
+        if 'domains' in normalized and 'domain' not in normalized:
+            domains = normalized.get('domains') or []
+            if isinstance(domains, list) and domains:
+                normalized['domain'] = domains[0]
     elif service_type == EmailServiceType.DUCK_MAIL:
         if 'domain' in normalized and 'default_domain' not in normalized:
             normalized['default_domain'] = normalized.pop('domain')

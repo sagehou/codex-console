@@ -3948,7 +3948,16 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
         svc = None
         for s in services:
             cfg = s.config or {}
-            if cfg.get("default_domain") == domain or cfg.get("domain") == domain:
+            cfg_domains = []
+            if cfg.get("default_domain"):
+                cfg_domains.append(str(cfg.get("default_domain")).strip().lower())
+            if cfg.get("domain"):
+                cfg_domains.append(str(cfg.get("domain")).strip().lower())
+            for value in cfg.get("domains") or []:
+                text = str(value or "").strip().lower()
+                if text:
+                    cfg_domains.append(text)
+            if domain in cfg_domains:
                 svc = s
                 break
         if not svc and services:

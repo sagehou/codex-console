@@ -33,6 +33,29 @@ def test_email_service_types_include_duck_mail():
     assert "api_key" in field_names
 
 
+def test_email_service_types_include_temp_mail_site_password_and_domains():
+    result = asyncio.run(email_routes.get_service_types())
+    temp_mail_type = next(item for item in result["types"] if item["value"] == "temp_mail")
+
+    fields = {field["name"]: field for field in temp_mail_type["config_fields"]}
+    assert "Site Password" in fields["custom_auth"]["label"]
+    assert "domains" in fields
+
+
+def test_filter_sensitive_config_marks_temp_mail_site_password():
+    filtered = email_routes.filter_sensitive_config({
+        "base_url": "https://mail.example.com",
+        "admin_password": "admin-secret",
+        "custom_auth": "site-secret",
+        "domains": ["a.example.com", "b.example.com"],
+    })
+
+    assert filtered["base_url"] == "https://mail.example.com"
+    assert filtered["domains"] == ["a.example.com", "b.example.com"]
+    assert filtered["has_custom_auth"] is True
+    assert "custom_auth" not in filtered
+
+
 def test_filter_sensitive_config_marks_duckmail_api_key():
     filtered = email_routes.filter_sensitive_config({
         "base_url": "https://api.duckmail.test",
@@ -60,7 +83,7 @@ def test_registration_available_services_include_duck_mail(monkeypatch):
         session.add(
             EmailService(
                 service_type="duck_mail",
-                name="DuckMail 主服务",
+                name="DuckMail Main Service",
                 config={
                     "base_url": "https://api.duckmail.test",
                     "default_domain": "duckmail.sbs",
@@ -89,6 +112,6 @@ def test_registration_available_services_include_duck_mail(monkeypatch):
 
     assert result["duck_mail"]["available"] is True
     assert result["duck_mail"]["count"] == 1
-    assert result["duck_mail"]["services"][0]["name"] == "DuckMail 主服务"
+    assert result["duck_mail"]["services"][0]["name"] == "DuckMail Main Service"
     assert result["duck_mail"]["services"][0]["type"] == "duck_mail"
     assert result["duck_mail"]["services"][0]["default_domain"] == "duckmail.sbs"
